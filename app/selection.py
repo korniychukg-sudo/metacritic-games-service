@@ -13,6 +13,7 @@ class Selection:
     items: list[tuple[ListItem, str]] = field(default_factory=list)
     state: DayState | None = None
     pages_fetched: int = 0
+    errors: list[tuple[str, Exception]] = field(default_factory=list)
 
     @property
     def sources(self) -> str:
@@ -31,8 +32,8 @@ def select_batch(
     batch_size: int = 20,
     page_size: int = 24,
     max_pages: int = 4,
+    retries: list[ListItem] | None = None,
 ) -> Selection:
-    """New Releases first, then SEE ALL pages from the cursor; the cursor passes a page only once it is fully handled."""
     state = DayState(state.day, state.new_releases_done, state.browse_offset)
     sel = Selection(state=state)
     taken: set[int] = set()
@@ -47,16 +48,29 @@ def select_batch(
             sel.items.append((it, source))
         return True
 
+    take(retries or [], "retry")
+
     if not state.new_releases_done:
-        items = fetch_new_releases()
-        complete = take(items, "new-releases")
-        if complete:
-            state.new_releases_done = True
-        if sel.items:
-            return sel
+        try:
+            items = fetch_new_releases()
+        except Exception as exc:
+            log.warning("New Releases unavailable, falling back to SEE ALL for this run: %s", exc)
+            sel.errors.append(("new-releases", exc))
+        else:
+            if take(items, "new-releases"):
+                state.new_releases_done = True
+            if any(src == "new-releases" for _, src in sel.items) or len(sel.items) >= batch_size:
+                return sel
 
     while len(sel.items) < batch_size and sel.pages_fetched < max_pages:
-        items = fetch_browse(state.browse_offset, page_size)
+        try:
+            items = fetch_browse(state.browse_offset, page_size)
+        except Exception as exc:
+            if not sel.items:
+                raise
+            log.warning("SEE ALL page at offset %d unavailable: %s", state.browse_offset, exc)
+            sel.errors.append((f"browse:{state.browse_offset}", exc))
+            break
         sel.pages_fetched += 1
         if not items:
             break

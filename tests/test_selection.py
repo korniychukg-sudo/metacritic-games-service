@@ -102,3 +102,57 @@ def test_page_cap_and_empty_listing():
     assert sel.state.browse_offset == 72
     empty = run(DayState("d", True, 0), set(), Source([], {}))
     assert empty.items == [] and empty.pages_fetched == 1
+
+
+def test_retries_come_first_and_count_towards_the_batch():
+    src = Source(items(1, 20), {0: items(1, 24)})
+    retry = [ListItem(id=500, slug="flaky", title="Flaky")]
+    sel = select_batch(DayState("d"), set(), src.fetch_new, src.fetch_browse, batch_size=5, retries=retry)
+    assert sel.items[0] == (retry[0], "retry")
+    assert [i.id for i, _ in sel.items[1:]] == [1, 2, 3, 4]
+    assert sel.state.new_releases_done is False
+
+
+def test_retry_alone_does_not_skip_new_releases_or_browse():
+    src = Source(items(1, 20), {0: items(1, 24)})
+    retry = [ListItem(id=7, slug="g-7", title="Game 7")]
+    sel = select_batch(DayState("d", new_releases_done=True), set(range(1, 25)) - {7}, src.fetch_new,
+                       src.fetch_browse, retries=retry)
+    assert [(i.id, s) for i, s in sel.items] == [(7, "retry")]
+    assert src.browse_calls == [0, 24]
+
+
+def test_new_releases_failure_falls_back_to_browse_and_stays_open():
+    class Broken(Source):
+        def fetch_new(self):
+            raise RuntimeError("finder 500")
+
+    src = Broken([], {0: items(1, 24)})
+    sel = run(DayState("d"), set(), src, batch=5)
+    assert len(sel.items) == 5 and sel.items[0][1] == "browse:p1"
+    assert sel.state.new_releases_done is False
+    assert sel.errors and sel.errors[0][0] == "new-releases"
+
+
+def test_browse_failure_keeps_already_taken_items():
+    class Flaky(Source):
+        def fetch_browse(self, offset, size):
+            if offset >= 24:
+                raise RuntimeError("timeout")
+            return super().fetch_browse(offset, size)
+
+    src = Flaky([], {0: items(1, 24)})
+    sel = run(DayState("d", True), set(), src, batch=30)
+    assert len(sel.items) == 24 and sel.state.browse_offset == 24
+    assert sel.errors[0][0] == "browse:24"
+
+
+def test_browse_failure_without_items_raises():
+    import pytest
+
+    class Down(Source):
+        def fetch_browse(self, offset, size):
+            raise RuntimeError("down")
+
+    with pytest.raises(RuntimeError):
+        run(DayState("d", True), set(), Down([], {}))

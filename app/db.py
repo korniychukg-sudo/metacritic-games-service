@@ -1,14 +1,19 @@
 import json
+import logging
 import os
+import queue
 import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from .config import iso, utcnow
 from .metacritic import GameDetails
 
-SCHEMA = """
+log = logging.getLogger("db")
+
+BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
     id INTEGER PRIMARY KEY,
     slug TEXT NOT NULL UNIQUE,
@@ -105,6 +110,32 @@ CREATE TABLE IF NOT EXISTS errors (
 );
 """
 
+MIGRATIONS: list[list[str]] = [
+    [
+        "ALTER TABLE processed ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1",
+        "CREATE INDEX IF NOT EXISTS idx_processed_day_status ON processed(day, status)",
+        "CREATE INDEX IF NOT EXISTS idx_errors_day ON errors(day)",
+        "CREATE INDEX IF NOT EXISTS idx_errors_at ON errors(at)",
+    ],
+    [
+        "ALTER TABLE runs ADD COLUMN owner TEXT",
+        "ALTER TABLE runs ADD COLUMN heartbeat_at TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)",
+        "CREATE INDEX IF NOT EXISTS idx_runs_day_trigger ON runs(day, trigger)",
+        "CREATE TABLE IF NOT EXISTS leases (name TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+        "acquired_at TEXT NOT NULL, expires_at TEXT NOT NULL)",
+    ],
+    [
+        "ALTER TABLE games ADD COLUMN backfill_at TEXT",
+        "ALTER TABLE games ADD COLUMN backfill_attempts INTEGER NOT NULL DEFAULT 0",
+    ],
+    [
+        "ALTER TABLE games ADD COLUMN trailer TEXT",
+    ],
+]
+
+SCHEMA_VERSION = len(MIGRATIONS)
+
 SORTS = {
     "metascore_desc": ("score_meta", "DESC"),
     "metascore_asc": ("score_meta", "ASC"),
@@ -117,7 +148,8 @@ SORTS = {
 }
 
 JSON_FIELDS = ("developers", "publishers", "genres", "franchises", "critic_reviews", "user_reviews",
-               "critic_summary", "user_summary", "letsplay", "similar")
+               "critic_summary", "user_summary", "letsplay", "similar", "trailer")
+JSON_COLUMNS = ("critic_summary", "user_summary", "letsplay", "similar", "trailer")
 
 
 @dataclass
@@ -135,40 +167,115 @@ def search_key(text: str) -> str:
     return " ".join((text or "").casefold().split())
 
 
-class Database:
-    def __init__(self, path: str):
-        self.path = path
-        if path != ":memory:":
-            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        self._local = threading.local()
-        self._write_lock = threading.Lock()
-        with self.conn() as c:
-            c.executescript(SCHEMA)
+def like_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
+
+class SchemaTooNew(RuntimeError):
+    pass
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise SchemaTooNew(f"database schema v{version} is newer than this code (v{SCHEMA_VERSION})")
+        if version == 0:
+            for statement in BASE_SCHEMA.split(";"):
+                if statement.strip():
+                    conn.execute(statement)
+        for number in range(version + 1, SCHEMA_VERSION + 1):
+            for statement in MIGRATIONS[number - 1]:
+                conn.execute(statement)
+            conn.execute(f"PRAGMA user_version = {number}")
+            log.info("Database migrated to schema v%d", number)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+class Database:
+    def __init__(self, path: str, pool_size: int = 8):
+        self.path = path
+        self.memory = path == ":memory:"
+        if not self.memory:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self.pool_size = 1 if self.memory else max(1, pool_size)
+        self._idle: queue.LifoQueue = queue.LifoQueue()
+        self._slots = threading.BoundedSemaphore(self.pool_size)
+        self._all: list[sqlite3.Connection] = []
+        self._all_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._closed = False
+        boot = self._connect(autocommit=True)
+        try:
+            self.schema_version = migrate(boot)
+        finally:
+            if self.memory:
+                boot.isolation_level = ""
+                self._register(boot)
+                self._idle.put(boot)
+            else:
+                boot.close()
+
+    def _connect(self, autocommit: bool = False) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False,
+                               isolation_level=None if autocommit else "")
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
-        if self.path != ":memory:":
+        if not self.memory:
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
         return conn
+
+    def _register(self, conn: sqlite3.Connection) -> None:
+        with self._all_lock:
+            self._all.append(conn)
+
+    @property
+    def open_connections(self) -> int:
+        with self._all_lock:
+            return len(self._all)
 
     @contextmanager
     def conn(self):
-        conn = getattr(self._local, "conn", None)
-        if conn is None:
-            conn = self._local.conn = self._connect()
+        if self._closed:
+            raise RuntimeError("database is closed")
+        self._slots.acquire()
         try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+            try:
+                conn = self._idle.get_nowait()
+            except queue.Empty:
+                conn = self._connect()
+                self._register(conn)
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                self._idle.put(conn)
+        finally:
+            self._slots.release()
 
     @contextmanager
     def write(self):
         with self._write_lock, self.conn() as c:
             yield c
+
+    def close(self) -> None:
+        self._closed = True
+        with self._all_lock:
+            conns, self._all = self._all, []
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
 
     def get_day_state(self, day: str) -> DayState:
         with self.conn() as c:
@@ -186,19 +293,28 @@ class Database:
                 (state.day, int(state.new_releases_done), state.browse_offset, iso(utcnow())),
             )
 
-    def processed_ids(self, day: str) -> set[int]:
+    def processed_ids(self, day: str, max_attempts: int = 1) -> set[int]:
         with self.conn() as c:
-            return {r[0] for r in c.execute("SELECT game_id FROM processed WHERE day=?", (day,))}
+            return {r[0] for r in c.execute(
+                "SELECT game_id FROM processed WHERE day=? AND (status != 'error' OR attempts >= ?)",
+                (day, max_attempts))}
+
+    def retry_candidates(self, day: str, max_attempts: int) -> list[dict]:
+        with self.conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT game_id, slug, title, source, attempts FROM processed "
+                "WHERE day=? AND status='error' AND attempts < ? ORDER BY processed_at", (day, max_attempts))]
 
     def mark_processed(self, day: str, game_id: int, slug: str, title: str, run_id: int | None, status: str,
-                       source: str) -> None:
+                       source: str) -> int:
         with self.write() as c:
             c.execute(
-                "INSERT INTO processed(day, game_id, slug, title, run_id, status, source, processed_at) "
-                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(day, game_id) DO UPDATE SET status=excluded.status, "
-                "run_id=excluded.run_id, processed_at=excluded.processed_at",
+                "INSERT INTO processed(day, game_id, slug, title, run_id, status, source, processed_at, attempts) "
+                "VALUES (?,?,?,?,?,?,?,?,1) ON CONFLICT(day, game_id) DO UPDATE SET status=excluded.status, "
+                "run_id=excluded.run_id, processed_at=excluded.processed_at, attempts=processed.attempts+1",
                 (day, game_id, slug, title, run_id, status, source, iso(utcnow())),
             )
+            return c.execute("SELECT attempts FROM processed WHERE day=? AND game_id=?", (day, game_id)).fetchone()[0]
 
     def processed_count(self, day: str, status: str | None = None) -> int:
         with self.conn() as c:
@@ -213,6 +329,7 @@ class Database:
             if not exists:
                 clash = c.execute("SELECT id FROM games WHERE slug=?", (g.slug,)).fetchone()
                 if clash:
+                    log.info("Slug %s moved from game %s to %s, replacing the old row", g.slug, clash[0], g.id)
                     c.execute("DELETE FROM games WHERE id=?", (clash[0],))
             values = {
                 "id": g.id,
@@ -262,10 +379,15 @@ class Database:
         return not exists
 
     def set_json(self, game_id: int, column: str, value) -> None:
-        if column not in ("critic_summary", "user_summary", "letsplay", "similar"):
+        if column not in JSON_COLUMNS:
             raise ValueError(column)
         with self.write() as c:
             c.execute(f"UPDATE games SET {column}=? WHERE id=?", (_dumps(value), game_id))
+
+    def mark_backfill_attempt(self, game_id: int) -> None:
+        with self.write() as c:
+            c.execute("UPDATE games SET backfill_at=?, backfill_attempts=backfill_attempts+1 WHERE id=?",
+                      (iso(utcnow()), game_id))
 
     def set_similar_bulk(self, mapping: dict[int, list[dict]]) -> None:
         with self.write() as c:
@@ -292,21 +414,18 @@ class Database:
                 "SELECT * FROM platforms WHERE game_id=? ORDER BY is_lead DESC, name", (g["id"],))]
         return g
 
-    def get_previous(self, game_id: int) -> dict | None:
-        with self.conn() as c:
-            row = c.execute("SELECT critic_summary, user_summary, letsplay FROM games WHERE id=?", (game_id,)).fetchone()
-        if not row:
-            return None
-        return {k: (json.loads(row[k]) if row[k] else None) for k in row.keys()}
-
     def games_with_fallbacks(self, limit: int) -> list[dict]:
         with self.conn() as c:
             rows = c.execute(
-                "SELECT id, slug, title, critic_summary, user_summary, letsplay, critic_reviews, user_reviews "
-                "FROM games WHERE json_extract(critic_summary, '$.method') = 'extractive' "
+                "SELECT id, slug, title, critic_summary, user_summary, letsplay, critic_reviews, user_reviews, "
+                "backfill_at, backfill_attempts FROM games "
+                "WHERE json_extract(critic_summary, '$.method') = 'extractive' "
                 "OR json_extract(user_summary, '$.method') = 'extractive' "
-                "OR json_extract(letsplay, '$.method') = 'extractive-transcript' "
-                "ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+                "OR (json_extract(letsplay, '$.method') = 'extractive-transcript' "
+                "    AND json_extract(letsplay, '$.transcript_excerpt') IS NOT NULL) "
+                "OR (json_extract(letsplay, '$.method') = 'description' "
+                "    AND json_extract(letsplay, '$.video.description') IS NOT NULL) "
+                "ORDER BY backfill_at IS NOT NULL, backfill_at, updated_at DESC LIMIT ?", (limit,)).fetchall()
         return [self._row_to_game(r) for r in rows]
 
     def all_features(self) -> list[dict]:
@@ -350,9 +469,9 @@ class Database:
             params.append(platform)
             meta_expr, user_expr = "p.metascore", "p.userscore"
         where = ""
-        if q:
-            where = "WHERE g.title_search LIKE ?"
-            params.append(f"%{search_key(q)}%")
+        if q and search_key(q):
+            where = "WHERE g.title_search LIKE ? ESCAPE '\\'"
+            params.append(f"%{like_escape(search_key(q))}%")
         base = f"FROM games g {join} {where}"
         order = f"{sort_col} IS NULL, {sort_col} {direction}, g.release_date DESC, g.id DESC"
         sql = (
@@ -386,28 +505,41 @@ class Database:
         with self.conn() as c:
             return c.execute("SELECT COUNT(*) FROM games").fetchone()[0]
 
-    def create_run(self, trigger: str, day: str) -> int:
+    def create_run(self, trigger: str, day: str, owner: str | None = None, now: datetime | None = None) -> int:
+        stamp = iso(now or utcnow())
         with self.write() as c:
-            cur = c.execute("INSERT INTO runs(trigger, day, started_at, status) VALUES (?,?,?,?)",
-                            (trigger, day, iso(utcnow()), "running"))
+            cur = c.execute(
+                "INSERT INTO runs(trigger, day, started_at, status, owner, heartbeat_at) VALUES (?,?,?,?,?,?)",
+                (trigger, day, stamp, "running", owner, stamp))
             return cur.lastrowid
 
     def finish_run(self, run_id: int, status: str, selected: int, ok: int, failed: int, sources: str,
-                   message: str = "") -> None:
+                   message: str = "", now: datetime | None = None) -> None:
         with self.write() as c:
             c.execute(
                 "UPDATE runs SET finished_at=?, status=?, selected=?, ok=?, failed=?, sources=?, message=? WHERE id=?",
-                (iso(utcnow()), status, selected, ok, failed, sources, message[:500], run_id),
+                (iso(now or utcnow()), status, selected, ok, failed, sources, message[:500], run_id),
             )
 
     def update_run_progress(self, run_id: int, selected: int, ok: int, failed: int, sources: str) -> None:
         with self.write() as c:
-            c.execute("UPDATE runs SET selected=?, ok=?, failed=?, sources=? WHERE id=?",
-                      (selected, ok, failed, sources, run_id))
+            c.execute("UPDATE runs SET selected=?, ok=?, failed=?, sources=?, heartbeat_at=? WHERE id=?",
+                      (selected, ok, failed, sources, iso(utcnow()), run_id))
 
-    def close_stale_runs(self) -> None:
+    def heartbeat_run(self, run_id: int, now: datetime | None = None) -> None:
         with self.write() as c:
-            c.execute("UPDATE runs SET status='interrupted', finished_at=? WHERE status='running'", (iso(utcnow()),))
+            c.execute("UPDATE runs SET heartbeat_at=? WHERE id=? AND status='running'", (iso(now or utcnow()), run_id))
+
+    def close_stale_runs(self, now: datetime | None = None, ttl_seconds: int = 90) -> int:
+        now = now or utcnow()
+        threshold = iso(now - timedelta(seconds=ttl_seconds))
+        with self.write() as c:
+            cur = c.execute(
+                "UPDATE runs SET status='interrupted', finished_at=?, "
+                "message=COALESCE(NULLIF(message, ''), 'Процесс остановился посреди запуска') "
+                "WHERE status='running' AND COALESCE(heartbeat_at, started_at) < ?",
+                (iso(now), threshold))
+            return cur.rowcount
 
     def recent_runs(self, limit: int = 10) -> list[dict]:
         with self.conn() as c:
@@ -416,6 +548,15 @@ class Database:
     def last_run(self) -> dict | None:
         runs = self.recent_runs(1)
         return runs[0] if runs else None
+
+    def last_finished_at(self) -> str | None:
+        with self.conn() as c:
+            row = c.execute("SELECT MAX(finished_at) FROM runs WHERE finished_at IS NOT NULL").fetchone()
+        return row[0] if row else None
+
+    def count_runs(self, day: str, trigger: str) -> int:
+        with self.conn() as c:
+            return c.execute("SELECT COUNT(*) FROM runs WHERE day=? AND trigger=?", (day, trigger)).fetchone()[0]
 
     def add_error(self, run_id: int | None, day: str, slug: str | None, step: str, message: str) -> None:
         with self.write() as c:
@@ -431,3 +572,40 @@ class Database:
     def recent_errors(self, limit: int = 20) -> list[dict]:
         with self.conn() as c:
             return [dict(r) for r in c.execute("SELECT * FROM errors ORDER BY id DESC LIMIT ?", (limit,))]
+
+    def prune(self, now: datetime, errors_keep_days: int, processed_keep_days: int) -> dict:
+        errors_before = iso(now - timedelta(days=errors_keep_days))
+        processed_before = (now - timedelta(days=processed_keep_days)).date().isoformat()
+        with self.write() as c:
+            e = c.execute("DELETE FROM errors WHERE at < ?", (errors_before,)).rowcount
+            p = c.execute("DELETE FROM processed WHERE day < ?", (processed_before,)).rowcount
+            d = c.execute("DELETE FROM day_state WHERE day < ?", (processed_before,)).rowcount
+        return {"errors": e, "processed": p, "day_state": d}
+
+    def acquire_lease(self, name: str, owner: str, ttl_seconds: int, now: datetime | None = None) -> bool:
+        now = now or utcnow()
+        with self.write() as c:
+            c.execute(
+                "INSERT INTO leases(name, owner, acquired_at, expires_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET owner=excluded.owner, acquired_at=excluded.acquired_at, "
+                "expires_at=excluded.expires_at WHERE leases.expires_at < ? OR leases.owner = excluded.owner",
+                (name, owner, iso(now), iso(now + timedelta(seconds=ttl_seconds)), iso(now)))
+            row = c.execute("SELECT owner FROM leases WHERE name=?", (name,)).fetchone()
+        return bool(row) and row[0] == owner
+
+    def renew_lease(self, name: str, owner: str, ttl_seconds: int, now: datetime | None = None) -> bool:
+        now = now or utcnow()
+        with self.write() as c:
+            cur = c.execute("UPDATE leases SET expires_at=? WHERE name=? AND owner=?",
+                            (iso(now + timedelta(seconds=ttl_seconds)), name, owner))
+            return cur.rowcount == 1
+
+    def release_lease(self, name: str, owner: str) -> None:
+        with self.write() as c:
+            c.execute("DELETE FROM leases WHERE name=? AND owner=?", (name, owner))
+
+    def lease_holder(self, name: str, now: datetime | None = None) -> str | None:
+        now = now or utcnow()
+        with self.conn() as c:
+            row = c.execute("SELECT owner FROM leases WHERE name=? AND expires_at >= ?", (name, iso(now))).fetchone()
+        return row[0] if row else None
