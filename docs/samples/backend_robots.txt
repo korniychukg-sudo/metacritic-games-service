@@ -1,0 +1,1 @@
+{"errors":[{"code":404,"reason":"Not Found","message":"Resource not found"}],"links":{"self":{"href":"https://backend.metacritic.com/robots.txt"}},"meta":{"componentName":null,"componentDisplayName":null,"componentType":null}}

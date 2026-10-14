@@ -1,0 +1,42 @@
+{
+ "request": {
+  "model": "openai",
+  "messages": [
+   {
+    "role": "system",
+    "content": "Ты кратко резюмируешь отзывы об играх на русском."
+   },
+   {
+    "role": "user",
+    "content": "Отзывы: 'Отличная физика и скорость, но кампания местами слишком сложная.' 'Нет сплит-скрина, меню неудобное.' Дай JSON {\"likes\":[...],\"dislikes\":[...]}."
+   }
+  ],
+  "temperature": 0.2
+ },
+ "status": 200,
+ "latency_s": 10.15,
+ "response": {
+  "id": "pllns_dbf22bb1e52b7be834944102641f7beb",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "```json\n{\n  \"likes\": [\n    \"Отличная физика и скорость\"\n  ],\n  \"dislikes\": [\n    \"Кампания слишком сложная\",\n    \"Нет сплит-скрина\",\n    \"Меню неудобное\"\n  ]\n}\n```",
+     "reasoning": "We need to parse the reviews. Two reviews:\n\n1. 'Отличная физика и скорость, но кампания местами слишком сложная.'\n2. 'Нет сплит-скрина, меню неудобное.'\n\nWe need to produce JSON with keys \"likes\" and \"dislikes\" arrays. Each array contains the summarized points. For likes: \"Отличная физика и скорость\" => \"Great physics and speed\". For dislikes: \"кампания местами слишком сложная\" => \"Campaign too hard in places\". \"Нет сплит-скрина\" => \"No split-screen\". \"меню неудобное\" => \"Menu inconvenient\".\n\nWe need to produce JSON. Should we include quotes? The output should be JSON string. Provide arrays of strings. Let's produce:\n\n{\n  \"likes\": [\"Отличная физика\", \"Скорость\"],\n  \"dislikes\": [\"Кампания слишком сложная\", \"Нет сплит-скрина\", \"Меню неудобное\"]\n}\n\nBut maybe combine physics and speed into one like: \"Отличная физика и скорость\". But the instruction: \"дай JSON {\"likes\":[...],\"dislikes\":[...]}\" So we can include each point as separate string. Let's produce:\n\n{\n  \"likes\": [\"Отличная физика\", \"Скорость\"],\n  \"dislikes\": [\"Кампания слишком сложная\", \"Нет сплит-скрина\", \"Меню неудобное\"]\n}\n\nBut maybe combine physics and speed into one like: \"Отличная физика и скорость\". That might be simpler. Let's do that.\n\n{\n  \"likes\": [\"Отличная физика и скорость\"],\n  \"dislikes\": [\"Кампания слишком сложная\", \"Нет сплит-скрина\", \"Меню неудобное\"]\n}\n\nYes. Provide JSON.",
+     "tool_calls": []
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "created": 1792002656,
+  "model": "gpt-oss-20b",
+  "object": "chat.completion",
+  "usage": {
+   "prompt_tokens": 131,
+   "completion_tokens": 444,
+   "total_tokens": 575
+  },
+  "user_tier": "anonymous"
+ }
+}

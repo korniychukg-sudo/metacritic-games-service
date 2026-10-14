@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% from "_macros.html" import meta_badge, user_badge, cover %}
+{% block title %}Игры Metacritic{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Новые игры с Metacritic</h1>
+    <p class="muted">В базе {{ games_in_db }} {{ 'игра' if games_in_db % 10 == 1 and games_in_db % 100 != 11 else ('игры' if games_in_db % 10 in [2,3,4] and games_in_db % 100 not in [12,13,14] else 'игр') }}. Сервис раз в час забирает 20 новых игр и обновляет уже известные.</p>
+  </div>
+  <a class="btn ghost" href="/monitor">Мониторинг{% if running %} · идёт обработка{% endif %}</a>
+</div>
+
+<form class="card filters" method="get" action="/" id="filters">
+  <input class="q" type="search" name="q" value="{{ q }}" placeholder="Поиск по названию" aria-label="Поиск по названию">
+  <select name="platform" aria-label="Платформа" data-autosubmit>
+    <option value="">Все платформы</option>
+    {% for p in platforms %}
+    <option value="{{ p.name }}" {% if p.name == platform %}selected{% endif %}>{{ p.name }} ({{ p.games }})</option>
+    {% endfor %}
+  </select>
+  <select name="sort" aria-label="Сортировка" data-autosubmit>
+    {% for key, label in sort_labels.items() %}
+    <option value="{{ key }}" {% if key == sort %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn" type="submit">Найти</button>
+</form>
+
+<div class="filter-meta">
+  <span class="muted small">Найдено: {{ total }}{% if platform %} · оценки показаны для платформы {{ platform }}{% endif %}</span>
+  {% if q or platform or sort != 'date_desc' %}<a class="small" href="/">Сбросить фильтры</a>{% endif %}
+</div>
+
+{% if games %}
+<div class="grid">
+  {% for g in games %}
+  <a class="card game-tile" href="/game/{{ g.slug }}">
+    {{ cover(g.cover_url, g.title) }}
+    <div class="tile-body">
+      <div class="tile-title">{{ g.title }}</div>
+      <div class="tile-meta">{{ g.release_date|date_ru }}{% if g.developers %} · {{ g.developers[0] }}{% endif %}</div>
+      <div class="chips">
+        {% for p in g.platforms[:5] %}<span class="chip {% if p.name == platform %}accent{% endif %}" title="{{ p.name }}">{{ p.short }}</span>{% endfor %}
+        {% if g.platforms|length > 5 %}<span class="chip">+{{ g.platforms|length - 5 }}</span>{% endif %}
+      </div>
+      <div class="scores">
+        {{ meta_badge(g.score_meta) }}<span class="score-label">Meta<br>score</span>
+        {{ user_badge(g.score_user) }}<span class="score-label">User<br>score</span>
+      </div>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% if pages > 1 %}
+<nav class="pager">
+  {% if page > 1 %}<a href="{{ page_url(page - 1) }}">← Назад</a>{% endif %}
+  {% for n in range(1, pages + 1) %}
+    {% if n == page %}<span class="current">{{ n }}</span>
+    {% elif n == 1 or n == pages or (n - page)|abs <= 2 %}<a href="{{ page_url(n) }}">{{ n }}</a>
+    {% elif (n - page)|abs == 3 %}<span>…</span>{% endif %}
+  {% endfor %}
+  {% if page < pages %}<a href="{{ page_url(page + 1) }}">Вперёд →</a>{% endif %}
+</nav>
+{% endif %}
+{% else %}
+<div class="card empty">
+  {% if games_in_db == 0 %}
+  <h2>Игр пока нет</h2>
+  <p class="muted">Первая обработка запускается автоматически вскоре после старта сервиса. Её ход видно на странице мониторинга, там же можно запустить обработку вручную.</p>
+  <a class="btn" href="/monitor">Открыть мониторинг</a>
+  {% else %}
+  <h2>Ничего не найдено</h2>
+  <p class="muted">Попробуйте изменить запрос или выбрать другую платформу.</p>
+  <a class="btn ghost" href="/">Сбросить фильтры</a>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

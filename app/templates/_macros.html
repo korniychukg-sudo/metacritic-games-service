@@ -1,0 +1,15 @@
+{% macro meta_badge(score, size='') -%}
+<span class="score {{ score|meta_class }} {{ size }}" title="Metascore">{{ score if score is not none else '—' }}</span>
+{%- endmacro %}
+{% macro user_badge(score, size='') -%}
+<span class="score user {{ score|user_class }} {{ size }}" title="Userscore">{{ score|user_fmt }}</span>
+{%- endmacro %}
+{% macro cover(url, title) -%}
+<div class="cover">
+  {% if url %}<img src="{{ url }}" alt="{{ title }}" loading="lazy" referrerpolicy="no-referrer">{% else %}<div class="noimg">нет обложки</div>{% endif %}
+</div>
+{%- endmacro %}
+{% macro method_badge(method) -%}
+{% set m = method or 'none' %}
+<span class="badge {% if m.startswith('llm') %}llm{% elif m == 'none' %}{% else %}warn{% endif %}">{{ m|method }}</span>
+{%- endmacro %}

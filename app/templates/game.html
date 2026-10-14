@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% from "_macros.html" import meta_badge, user_badge, cover, method_badge %}
+{% block title %}{{ g.title }} · Игры Metacritic{% endblock %}
+{% block content %}
+<p class="small"><a href="/">← Все игры</a></p>
+
+<section class="card hero">
+  {{ cover(g.cover_url, g.title) }}
+  <div class="hero-info">
+    <div>
+      <h1>{{ g.title }}</h1>
+      <div class="chips">
+        {% for genre in g.genres or [] %}<span class="chip">{{ genre }}</span>{% endfor %}
+        {% for fr in g.franchises or [] %}<span class="chip accent">{{ fr }}</span>{% endfor %}
+      </div>
+    </div>
+    <div class="hero-scores">
+      <div class="score-box">{{ meta_badge(g.metascore, 'lg') }}<div><strong>Metascore</strong><div class="muted small">{{ g.lead_platform or 'ведущая платформа' }}{% if g.critic_total %}, {{ g.critic_total }} рецензий{% endif %}</div></div></div>
+      <div class="score-box">{{ user_badge(g.userscore, 'lg') }}<div><strong>Userscore</strong><div class="muted small">{{ g.lead_platform or 'ведущая платформа' }}</div></div></div>
+    </div>
+    <dl class="facts">
+      <dt>Разработчик</dt><dd>{{ (g.developers or [])|join(', ') or '—' }}</dd>
+      <dt>Издатель</dt><dd>{{ (g.publishers or [])|join(', ') or '—' }}</dd>
+      <dt>Дата выхода</dt><dd>{{ g.release_date|date_ru }}</dd>
+      {% if g.rating %}<dt>Рейтинг ESRB</dt><dd>{{ g.rating }}</dd>{% endif %}
+      <dt>Платформы</dt><dd>{{ g.platforms|map(attribute='name')|join(', ') or '—' }}</dd>
+    </dl>
+    <div class="actions">
+      <a class="btn" href="{{ g.metacritic_url }}" target="_blank" rel="noopener">Открыть на Metacritic</a>
+      {% if g.video_embed_url %}<a class="btn ghost" href="{{ g.video_embed_url }}" target="_blank" rel="noopener">Трейлер</a>{% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="section card pad">
+  <h2>Оценки по платформам</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Платформа</th><th>Metascore</th><th>Userscore</th><th>Релиз</th></tr></thead>
+      <tbody>
+        {% for p in g.platforms %}
+        <tr>
+          <td><strong>{{ p.name }}</strong> <span class="chip">{{ p.short }}</span>{% if p.is_lead %} <span class="badge">ведущая</span>{% endif %}</td>
+          <td><div class="cell-score">{{ meta_badge(p.metascore) }}<span class="muted small">{% if p.critic_count %}{{ p.critic_count }} рец.{% else %}нет рецензий{% endif %}</span></div></td>
+          <td><div class="cell-score">{{ user_badge(p.userscore) }}<span class="muted small">{% if p.user_count %}{{ p.user_count|num }} оценок{% else %}нет оценок{% endif %}</span></div></td>
+          <td class="muted">{{ p.release_date|date_ru }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="section card pad">
+  <h2>Описание</h2>
+  {% if g.description %}<p class="desc">{{ g.description }}</p>{% else %}<p class="muted">Описания на Metacritic нет.</p>{% endif %}
+  {% if g.video_embed_url %}
+  <details>
+    <summary>Смотреть трейлер{% if g.video_title %}: {{ g.video_title }}{% endif %}</summary>
+    <div class="embed"><iframe src="{{ g.video_embed_url }}" title="{{ g.video_title or 'Трейлер' }}" loading="lazy" allowfullscreen></iframe></div>
+    <p class="small muted">Ссылка на видео: <a href="{{ g.video_embed_url }}" target="_blank" rel="noopener">{{ g.video_embed_url }}</a>{% if g.video_manifest_url %} · <a href="{{ g.video_manifest_url }}" target="_blank" rel="noopener">HLS</a>{% endif %}</p>
+  </details>
+  {% else %}
+  <p class="small muted">Видео на Metacritic для этой игры нет.</p>
+  {% endif %}
+</section>
+
+<div class="section two-col">
+  {% for kind, s, reviews, title in [('critic', g.critic_summary, g.critic_reviews, 'Что говорят критики'), ('user', g.user_summary, g.user_reviews, 'Что говорят игроки')] %}
+  <section class="card pad summary">
+    <h2>{{ title }}</h2>
+    {% if s and s.method != 'none' %}
+      {% if s.verdict %}<p class="verdict">{{ s.verdict }}</p>{% endif %}
+      {% if s.likes %}<h3>Нравится</h3><ul class="points likes">{% for x in s.likes %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
+      {% if s.dislikes %}<h3>Не нравится</h3><ul class="points dislikes">{% for x in s.dislikes %}<li>{{ x }}</li>{% endfor %}</ul>
+      {% else %}<h3>Не нравится</h3><p class="muted small">Заметных претензий в отзывах нет.</p>{% endif %}
+      <div class="method">{{ method_badge(s.method) }} по {{ s.sample_size }} отзывам из {{ s.review_count }} · обновлено {{ s.updated_at|dt }}{% if s.note %}<br>{{ s.note }}{% endif %}</div>
+    {% elif s %}
+      <p class="muted">{{ s.verdict or 'Отзывов пока нет.' }}</p>
+    {% else %}
+      <p class="muted">Резюме ещё не построено.</p>
+    {% endif %}
+    {% if reviews %}
+    <details>
+      <summary>Исходные отзывы ({{ reviews|length }})</summary>
+      <ul class="quotes">
+        {% for r in reviews %}
+        <li class="{{ r.sentiment }}"><strong>{% if r.score is not none %}{{ r.score|int if kind == 'critic' else r.score }}{% else %}без оценки{% endif %}</strong>
+          · {% if r.url %}<a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.author or 'рецензия' }}</a>{% else %}{{ r.author or 'аноним' }}{% endif %}{% if r.platform %} · {{ r.platform }}{% endif %}<br>{{ r.quote }}</li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>
+
+<section class="section card pad">
+  {% set lp = g.letsplay %}
+  <h2>Летсплей на YouTube {% if lp %}{{ method_badge(lp.method) }}{% endif %}</h2>
+  {% if not lp %}
+    <p class="muted">Поиск летсплея ещё не выполнялся.</p>
+  {% elif not lp.video %}
+    <p class="muted">{{ lp.note or 'Подходящий летсплей не найден.' }}</p>
+  {% else %}
+    {% set v = lp.video %}
+    <div class="video">
+      <div>
+        <a class="thumb" href="{{ v.url }}" target="_blank" rel="noopener" title="Открыть на YouTube">
+          <img src="https://i.ytimg.com/vi/{{ v.video_id }}/hqdefault.jpg" alt="{{ v.title }}" loading="lazy" referrerpolicy="no-referrer">
+          <span class="play"><span>▶</span></span>
+        </a>
+        <p class="small" style="margin:8px 0 0"><a href="{{ v.url }}" target="_blank" rel="noopener"><strong>{{ v.title }}</strong></a></p>
+        <p class="small muted" style="margin:2px 0 0">{{ v.channel or '' }} · {{ v.views|num }} просмотров{% if v.length_seconds %} · {{ v.length_seconds|duration }}{% endif %}</p>
+      </div>
+      <div>
+        {% if lp.verdict %}<p class="verdict">{{ lp.verdict }}</p>{% endif %}
+        {% if lp.summary %}<p style="margin-top:0">{{ lp.summary }}</p>{% endif %}
+        {% if lp.pros %}<h3>Понравилось блогеру</h3><ul class="points likes">{% for x in lp.pros %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
+        {% if lp.cons %}<h3>Не понравилось</h3><ul class="points dislikes">{% for x in lp.cons %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
+        {% if not lp.summary and not lp.pros and not lp.cons %}<p class="muted">{{ lp.note or 'Заключение построить не удалось.' }} Ссылка на ролик сохранена.</p>{% endif %}
+        <div class="method">
+          {% if lp.status == 'ok' %}Основано на расшифровке речи блогера ({{ lp.transcript_chars|num }} символов, язык: {{ lp.transcript_lang }}).
+          {% elif lp.note %}{{ lp.note }}.{% endif %}
+          Самый популярный подходящий ролик выбран из поиска YouTube по просмотрам. Обновлено {{ lp.updated_at|dt }}.
+          {% if lp.error %}<br><span class="badge err">LLM: {{ lp.error }}</span>{% endif %}
+        </div>
+      </div>
+    </div>
+    {% if lp.transcript_excerpt %}
+    <details>
+      <summary>Фрагменты расшифровки речи блогера (начало, середина, конец)</summary>
+      <p class="small desc" style="margin-top:10px">{{ lp.transcript_excerpt }}</p>
+    </details>
+    {% endif %}
+    {% if lp.candidates and lp.candidates|length > 1 %}
+    <details>
+      <summary>Другие найденные ролики ({{ lp.candidates|length - 1 }})</summary>
+      <ul class="quotes">
+        {% for c in lp.candidates if c.video_id != v.video_id %}
+        <li><a href="{{ c.url }}" target="_blank" rel="noopener">{{ c.title }}</a> · {{ c.channel }} · {{ c.views|num }} просмотров</li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+  {% endif %}
+</section>
+
+<section class="section card pad">
+  <h2>Похожие игры <span class="muted small">из тех, что уже есть в базе</span></h2>
+  {% if g.similar_games %}
+  <div class="similar">
+    {% for s in g.similar_games %}
+    <a href="/game/{{ s.slug }}">
+      {{ cover(s.cover_url, s.title) }}
+      <span class="sim-title">{{ s.title }}</span>
+      <span class="chips">{{ meta_badge(s.metascore) }}{% for r in s.reasons[:2] %}<span class="chip">{{ r }}</span>{% endfor %}</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted">Похожих игр в базе пока нет. Список пересчитывается после каждой обработки.</p>
+  {% endif %}
+</section>
+
+<p class="small muted section">Первое появление в базе: {{ g.first_seen_at|dt }} · последнее обновление: {{ g.updated_at|dt }} · обработок: {{ g.times_processed }} · источник: {{ g.source }}</p>
+{% endblock %}
