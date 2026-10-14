@@ -70,7 +70,10 @@ def _norm_set(values: list[str]) -> set[str]:
     return {v.strip().lower() for v in values if v and v.strip()}
 
 
-def compute_similar(games: list[GameFeatures], top_n: int = 5, min_score: float = 0.04) -> dict[int, list[dict]]:
+MIN_DESC = 0.06
+
+
+def compute_similar(games: list[GameFeatures], top_n: int = 5, min_score: float = 0.05) -> dict[int, list[dict]]:
     if len(games) < 2:
         return {g.id: [] for g in games}
     docs = {g.id: tokenize(f"{g.title} {g.description}") for g in games}
@@ -117,8 +120,9 @@ def compute_similar(games: list[GameFeatures], top_n: int = 5, min_score: float 
                 "developer": 1.0 if m["developer"] & om["developer"] else 0.0,
                 "platform": _jaccard(m["platform"], om["platform"]),
             }
+            meaningful = parts["franchise"] or parts["developer"] or parts["genre"] or parts["desc"] >= MIN_DESC
             score = sum(WEIGHTS[k] * v for k, v in parts.items())
-            if score < min_score:
+            if not meaningful or score < min_score:
                 continue
             reasons = []
             if parts["franchise"]:
@@ -127,8 +131,10 @@ def compute_similar(games: list[GameFeatures], top_n: int = 5, min_score: float 
                 reasons.append("тот же разработчик")
             if parts["genre"]:
                 reasons.append("общий жанр")
-            if parts["desc"] >= 0.08:
+            if parts["desc"] >= MIN_DESC:
                 reasons.append("похожее описание")
+            if parts["platform"] >= 0.5:
+                reasons.append("те же платформы")
             scored.append((score, other, reasons))
         scored.sort(key=lambda x: (-x[0], x[1]))
         result[g.id] = [{"id": o, "score": round(s, 4), "reasons": r} for s, o, r in scored[:top_n]]
