@@ -152,29 +152,41 @@ class FakeYouTube:
         self.watch = parse_watch_html(load_text("yt_watch_bGBXM6oxbag.html"))
         self.transcript_ok = transcript_ok
         self.blocked = blocked
+        self.empty = False
+        self.no_trailer = False
         self.searches = 0
         self.trailer_searches = 0
         self.transcript_calls = 0
+        self.transcript_texts: dict[str, str] = {}
+        self.last_stats: dict = {}
+        self.release_dates = []
 
-    def find_letsplays(self, title):
+    def find_letsplays(self, title, release_date=None):
         self.searches += 1
+        self.release_dates.append(release_date)
         if self.blocked:
             raise YouTubeBlocked("YouTube показал капчу")
+        if self.empty:
+            self.last_stats = {"found": 0, "eligible": 0}
+            return []
         cands = [VideoCandidate(**{**c.__dict__, "queries": []}) for c in self.cands]
-        return rank_candidates("Star Wars: Galactic Racer", cands)
+        self.last_stats = {}
+        return rank_candidates("Star Wars: Galactic Racer", cands, stats=self.last_stats)
 
-    def find_trailer(self, title):
+    def find_trailer(self, title, release_date=None):
         self.trailer_searches += 1
         if self.blocked:
             raise YouTubeBlocked("YouTube показал капчу")
+        if self.no_trailer:
+            return None
         return VideoCandidate("TrAiLeR0001", f"{title} - Official Trailer", views=1000, length_seconds=120,
                               channel="Publisher")
 
     def transcript(self, video_id):
         self.transcript_calls += 1
         if not self.transcript_ok:
-            raise TranscriptUnavailable("TranscriptsDisabled")
-        return self.text, "en"
+            raise TranscriptUnavailable("автор отключил субтитры", "TranscriptsDisabled")
+        return self.transcript_texts.get(video_id, self.text), "en"
 
     def watch_details(self, video_id):
         return dict(self.watch, video_id=video_id)
@@ -183,8 +195,9 @@ class FakeYouTube:
 class FakeLLM:
     model = "fake-model"
 
-    def __init__(self, fail=False, threshold=None):
+    def __init__(self, fail=False, threshold=None, commentary=True):
         self.fail = fail
+        self.commentary = commentary
         self.threshold = threshold
         self.calls = 0
         self.enabled = True
@@ -221,9 +234,16 @@ class FakeLLM:
             raise LLMError("HTTP 503")
         prompt = messages[-1]["content"]
         self.prompts.append(prompt)
-        if '"summary"' in prompt:
-            value = {"summary": "Автор ролика проходит первые гонки.", "pros": ["скорость"], "cons": ["сложность"],
-                     "verdict": "Блогеру понравилось."}
+        if '"has_commentary"' in prompt:
+            commentary = self.commentary(prompt) if callable(self.commentary) else self.commentary
+            body = prompt.split(":\n", 1)[1].split("\n\nСначала определи", 1)[0]
+            quote = " ".join(body.replace("…", " ").split()[:9])
+            value = {"has_commentary": commentary, "evidence": [quote] if commentary else [],
+                     "summary": "Автор ролика проходит первые гонки." if commentary else "",
+                     "pros": ["скорость"] if commentary else [], "cons": ["сложность"] if commentary else [],
+                     "verdict": "Автору понравилось." if commentary else ""}
+        elif '"summary"' in prompt:
+            value = {"summary": "Судя по описанию ролика, в нём показаны первые гонки."}
         else:
             value = {"likes": ["красивые трассы"], "dislikes": ["нет сплит-скрина"], "verdict": "В целом хвалят."}
         return validator(value) if validator else value

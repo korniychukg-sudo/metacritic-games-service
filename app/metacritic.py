@@ -465,7 +465,7 @@ class MetacriticClient:
             except NotFound:
                 p.userscore, p.user_count = None, 0
             except Exception as exc:
-                log.warning("user stats %s/%s failed: %s", slug, p.slug, exc)
+                log.warning("Userscore %s/%s не получен: %s", slug, p.slug, exc)
         if top_up_reviews:
             lead = next((p for p in game.platforms if p.is_lead), None)
             if lead:
@@ -482,7 +482,7 @@ class MetacriticClient:
         try:
             extra = self.review_list(kind, game.slug, platform_slug, sentiment="negative")
         except Exception as exc:
-            log.info("extra %s reviews for %s unavailable: %s", kind, game.slug, exc)
+            log.info("Дополнительные отзывы (%s) для %s недоступны: %s", kind, game.slug, exc)
             return
         known = {r.quote for r in reviews}
         for r in extra:

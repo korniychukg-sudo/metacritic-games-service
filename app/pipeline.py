@@ -10,15 +10,17 @@ from .db import Database
 from .http_client import SchemaError
 from .llm import LLMClient, LLMDisabled, LLMError, LLMSkipped
 from .metacritic import GameDetails, ListItem, MetacriticClient, PlatformInfo, Review
-from .monitor import Monitor
+from .monitor import TRIGGER_LABELS, Monitor
 from .selection import select_batch
 from .similarity import GameFeatures, compute_similar
 from .stt import SpeechResult, SpeechToText, SpeechUnavailable
 from .summarize import (
     build_letsplay_prompt,
     extractive_transcript_summary,
+    looks_like_commentary,
     reviews_hash,
     summarize_reviews,
+    validate_description_json,
     validate_letsplay_json,
 )
 from .youtube import TranscriptUnavailable, VideoCandidate, YouTubeClient, sample_transcript
@@ -28,6 +30,9 @@ log = logging.getLogger("pipeline")
 LEASE = "pipeline"
 FULL_LETSPLAY = {"llm-transcript", "extractive-transcript", "llm-whisper", "extractive-whisper"}
 TRANSCRIPT_EXTRACTIVE = {"extractive-transcript": "transcript", "extractive-whisper": "whisper"}
+NO_COMMENTARY_TEXT = "в тексте почти нет речи автора (только диалоги игры, музыка или шум)"
+NO_COMMENTARY_LLM = "LLM не нашла в тексте оценок игры от автора ролика (диалоги игры или геймплей без комментариев)"
+NO_TEXT = "субтитров нет, речь не распознана"
 SCALAR_KEEP = ("description", "cover_url", "hero_url", "video_embed_url", "video_manifest_url", "video_title",
                "release_date", "lead_platform", "rating")
 LIST_KEEP = ("developers", "publishers", "genres", "franchises")
@@ -39,6 +44,45 @@ class AlreadyRunning(Exception):
 
 def make_owner_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+def ru_count(n: int, one: str, few: str, many: str) -> str:
+    form = one if n % 10 == 1 and n % 100 != 11 else few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many
+    return f"{n} {form}"
+
+
+def grouped(reasons: list[str]) -> str:
+    counts: dict[str, int] = {}
+    for r in reasons:
+        counts[r] = counts.get(r, 0) + 1
+    return ", ".join(r if n == 1 else f"{r} ({ru_count(n, 'ролик', 'ролика', 'роликов')})" for r, n in counts.items())
+
+
+def failure_note(checked: list[dict], stt_notes: list[dict], skipped: list[dict], captions: bool) -> str:
+    parts = []
+    if checked:
+        parts.append("субтитры: " + grouped([c["reason"] for c in checked]))
+    elif not captions:
+        parts.append("субтитры YouTube не запрашивались (YOUTUBE_CAPTIONS=0)")
+    if stt_notes:
+        parts.append("Whisper: " + grouped([n["reason"] for n in stt_notes]))
+    no_talk = [s for s in skipped if s["reason"] in (NO_COMMENTARY_TEXT, NO_COMMENTARY_LLM)]
+    if no_talk:
+        parts.append("без комментариев автора: " + ru_count(len(no_talk), "ролик", "ролика", "роликов"))
+    return "Речь автора ролика не расшифрована" + (f" ({'; '.join(parts)})" if parts else "")
+
+
+def letsplay_rank(lp: dict | None) -> int:
+    if not lp:
+        return 0
+    verified = lp.get("has_commentary") is True or str(lp.get("method", "")).startswith("extractive")
+    if lp.get("status") == "ok" and lp.get("method") in FULL_LETSPLAY and verified and not lp.get("llm_no_commentary"):
+        return 3
+    if lp.get("video"):
+        return 2
+    if lp.get("status") == "no_video":
+        return 1
+    return 0
 
 
 def keep_stored_data(game: GameDetails, stored: dict | None) -> list[str]:
@@ -94,7 +138,7 @@ class _Heartbeat:
                 p.db.renew_lease(LEASE, p.owner, p.settings.lease_ttl_seconds, now)
                 p.db.heartbeat_run(self.run_id, now)
             except Exception as exc:
-                log.warning("Heartbeat for run #%d failed: %s", self.run_id, exc)
+                log.warning("Запуск #%d: не удалось продлить блокировку: %s", self.run_id, exc)
 
 
 class Pipeline:
@@ -128,9 +172,9 @@ class Pipeline:
         try:
             if self.db.acquire_lease(LEASE, self.owner, self.settings.lease_ttl_seconds, self.clock()):
                 return True
-            log.info("Another process holds the run lease, skipping")
+            log.info("Обработку уже ведёт другой процесс, запуск пропущен")
         except Exception:
-            log.exception("Could not take the run lease")
+            log.exception("Не удалось взять блокировку запуска")
         self._lock.release()
         return False
 
@@ -138,7 +182,7 @@ class Pipeline:
         try:
             self.db.release_lease(LEASE, self.owner)
         except Exception:
-            log.exception("Could not release the run lease")
+            log.exception("Не удалось снять блокировку запуска")
         finally:
             self._lock.release()
 
@@ -150,7 +194,7 @@ class Pipeline:
             try:
                 self._run(trigger, limit)
             except Exception:
-                log.exception("Background run crashed")
+                log.exception("Фоновый запуск упал")
             finally:
                 self._release()
 
@@ -174,7 +218,7 @@ class Pipeline:
         try:
             self.db.add_error(run_id, day, slug, step, message)
         except Exception:
-            log.exception("Could not record an error")
+            log.exception("Не удалось записать ошибку в журнал")
 
     def _run(self, trigger: str, limit: int | None) -> dict:
         s = self.settings
@@ -196,12 +240,13 @@ class Pipeline:
         heartbeat.start()
         self.monitor.set_progress(run_id=run_id, done=0, total=0, ok=0, failed=0, current=None,
                                   step="выбор игр", started_at=iso(started))
-        self.monitor.set_worker("pipeline", "running", f"запуск #{run_id} ({trigger}): выбор игр")
-        log.info("Run #%d started (%s), day %s, batch %d", run_id, trigger, day, batch)
+        trigger_label = TRIGGER_LABELS.get(trigger, trigger)
+        self.monitor.set_worker("pipeline", "running", f"запуск #{run_id} ({trigger_label}): выбор игр")
+        log.info("Запуск #%d начат (%s), день %s, до %d игр", run_id, trigger_label, day, batch)
         try:
             message = self._run_body(run_id, day, batch, started, result)
         except Exception as exc:
-            log.exception("Run #%d crashed", run_id)
+            log.exception("Запуск #%d прерван ошибкой", run_id)
             result["status"] = "failed"
             message = f"Запуск прерван ошибкой: {exc.__class__.__name__}: {exc}"
             self._error(run_id, day, None, "run", message)
@@ -215,11 +260,11 @@ class Pipeline:
                 self.db.finish_run(run_id, result["status"], result["selected"], result["ok"], result["failed"],
                                    result["sources"], message, self.clock())
             except Exception:
-                log.exception("Run #%d: could not record the finish", run_id)
+                log.exception("Запуск #%d: не удалось записать итог", run_id)
             worker_status = "error" if result["status"] == "failed" else "idle"
-            self.monitor.set_worker("pipeline", worker_status, f"последний запуск #{run_id}: {message.lower()}")
+            self.monitor.set_worker("pipeline", worker_status, f"последний запуск #{run_id}: {message}")
             self.monitor.reset_progress()
-            log.info("Run #%d finished (%s): %s in %d s", run_id, result["status"], message, result["seconds"])
+            log.info("Запуск #%d завершён за %d с: %s", run_id, result["seconds"], message)
         return result
 
     def _run_body(self, run_id: int, day: str, batch: int, started: datetime, result: dict) -> str:
@@ -229,9 +274,9 @@ class Pipeline:
         try:
             pruned = self.db.prune(started, s.errors_keep_days, s.processed_keep_days)
             if any(pruned.values()):
-                log.info("Pruned old rows: %s", pruned)
+                log.info("Удалены старые записи: %s", pruned)
         except Exception:
-            log.exception("Pruning failed")
+            log.exception("Не удалось удалить старые записи")
 
         state = self.db.get_day_state(day)
         processed = self.db.processed_ids(day, s.failed_game_max_attempts)
@@ -249,7 +294,7 @@ class Pipeline:
                 retries=retries,
             )
         except Exception as exc:
-            log.exception("Run #%d: selection failed", run_id)
+            log.exception("Запуск #%d: не удалось выбрать игры", run_id)
             step = "selection:schema" if isinstance(exc, SchemaError) else "selection"
             self._error(run_id, day, None, step, f"{exc.__class__.__name__}: {exc}")
             self.monitor.set_worker("metacritic", "error", f"список игр недоступен: {exc}")
@@ -260,7 +305,7 @@ class Pipeline:
 
         total = len(sel.items)
         result.update(selected=total, sources=sel.sources)
-        log.info("Run #%d: selected %d games (%s), browse cursor %d -> %d", run_id, total, sel.sources or "—",
+        log.info("Запуск #%d: выбрано %d игр (%s), курсор SEE ALL %d -> %d", run_id, total, sel.sources or "—",
                  state.browse_offset, sel.state.browse_offset)
         self.monitor.set_progress(total=total)
         self.db.update_run_progress(run_id, total, 0, 0, sel.sources)
@@ -270,7 +315,7 @@ class Pipeline:
         for i, (item, source) in enumerate(sel.items):
             if self.clock() >= deadline:
                 cut = True
-                log.warning("Run #%d: time limit of %d min reached, %d games left for the next run", run_id,
+                log.warning("Запуск #%d: достигнут лимит %d мин, %d игр останутся следующему запуску", run_id,
                             s.run_max_minutes, total - i)
                 break
             self.monitor.set_progress(done=i, current=item.title)
@@ -281,14 +326,14 @@ class Pipeline:
             except Exception as exc:
                 status = "error"
                 failed += 1
-                log.exception("Run #%d: game %s failed", run_id, item.slug)
+                log.exception("Запуск #%d: ошибка на игре %s", run_id, item.slug)
                 step = self.monitor.progress.get("step") or "game"
                 if isinstance(exc, SchemaError):
                     step = f"{step}:schema"
                 self._error(run_id, day, item.slug, step, f"{exc.__class__.__name__}: {exc}")
             attempts = self.db.mark_processed(day, item.id, item.slug, item.title, run_id, status, source)
             if status == "error" and attempts < s.failed_game_max_attempts:
-                log.info("Run #%d: %s will be retried later today (attempt %d of %d)", run_id, item.slug,
+                log.info("Запуск #%d: %s повторим сегодня позже (попытка %d из %d)", run_id, item.slug,
                          attempts, s.failed_game_max_attempts)
             attempted += 1
             result.update(ok=ok, failed=failed)
@@ -298,22 +343,22 @@ class Pipeline:
         if attempted == total:
             self.db.save_day_state(sel.state)
         else:
-            log.info("Run #%d: day cursor kept at its previous position so unfinished games are picked up", run_id)
+            log.info("Запуск #%d: курсор дня не сдвинут, необработанные игры возьмёт следующий запуск", run_id)
 
         if s.llm_backfill_limit and self.llm is not None and self.llm.available and self.clock() < deadline:
             try:
                 self._step("LLM: досчёт резюме без LLM")
                 upgraded = self.backfill_llm({it.id for it, _ in sel.items}, s.llm_backfill_limit, deadline)
                 if upgraded:
-                    log.info("Run #%d: upgraded %d fallback summaries to LLM", run_id, upgraded)
+                    log.info("Запуск #%d: через LLM пересчитано резюме из запасного режима: %d", run_id, upgraded)
             except Exception:
-                log.exception("Run #%d: LLM backfill failed", run_id)
+                log.exception("Запуск #%d: досчёт через LLM упал", run_id)
 
         try:
             self._step("похожие игры")
             self.recompute_similar()
         except Exception as exc:
-            log.exception("Run #%d: similarity failed", run_id)
+            log.exception("Запуск #%d: не удалось пересчитать похожие игры", run_id)
             self._error(run_id, day, None, "similar", str(exc))
 
         if total == 0:
@@ -337,8 +382,8 @@ class Pipeline:
             self._error(run_id, day, game.slug, "данные Metacritic:schema", note)
         prev = stored or {}
         is_new = self.db.upsert_game(game, source)
-        log.info("%s %s: %d platforms, metascore %s, userscore %s, %d+%d reviews",
-                 "Added" if is_new else "Updated", game.slug, len(game.platforms), game.metascore,
+        log.info("%s %s: платформ %d, Metascore %s, Userscore %s, отзывов %d+%d",
+                 "Добавлена" if is_new else "Обновлена", game.slug, len(game.platforms), game.metascore,
                  game.userscore, len(game.critic_reviews), len(game.user_reviews))
 
         for kind, reviews, total, column in (
@@ -366,16 +411,17 @@ class Pipeline:
         self._step("YouTube: поиск летсплея", game.title)
         now = iso(self.clock())
         try:
-            letsplay = self.find_letsplay(game.title)
+            letsplay = self.find_letsplay(game.title, game.release_date)
         except Exception as exc:
-            log.warning("Let's play for %s failed: %s", game.slug, exc)
+            log.warning("Летсплей для %s: ошибка поиска: %s", game.slug, exc)
             step = "youtube:schema" if isinstance(exc, SchemaError) else "youtube"
             self._error(run_id, day, game.slug, step, f"{exc.__class__.__name__}: {exc}")
             note = f"Ошибка при поиске летсплея: {exc}"
-            if old_lp and old_lp.get("video"):
-                letsplay = {**old_lp, "last_error": note, "checked_at": now}
-            else:
-                letsplay = {"status": "error", "method": "none", "note": note, "updated_at": now, "checked_at": now}
+            letsplay = {"status": "error", "method": "none", "note": note, "updated_at": now, "checked_at": now}
+        if old_lp and old_lp.get("video") and letsplay_rank(old_lp) > letsplay_rank(letsplay):
+            log.info("Летсплей для %s: новый результат хуже сохранённого, оставлен прежний ролик", game.slug)
+            letsplay = {**old_lp, "last_error": letsplay.get("note") or "новый поиск не дал результата",
+                        "checked_at": now}
         self.db.set_json(game.id, "letsplay", letsplay)
 
     def _due(self, record: dict | None, period: timedelta) -> bool:
@@ -389,7 +435,8 @@ class Pipeline:
 
     def letsplay_due(self, old: dict | None) -> bool:
         s = self.settings
-        if old and old.get("status") == "ok" and old.get("method") in FULL_LETSPLAY:
+        if (old and old.get("status") == "ok" and old.get("method") in FULL_LETSPLAY
+                and not old.get("llm_no_commentary")):
             return self._due(old, timedelta(days=s.letsplay_refresh_days))
         return self._due(old, timedelta(hours=s.letsplay_retry_hours))
 
@@ -408,9 +455,9 @@ class Pipeline:
         self._step("YouTube: трейлер", game.title)
         now = iso(self.clock())
         try:
-            cand = finder(game.title)
+            cand = finder(game.title, game.release_date)
         except Exception as exc:
-            log.warning("Trailer search for %s failed: %s", game.slug, exc)
+            log.warning("Трейлер для %s: ошибка поиска: %s", game.slug, exc)
             if old and old.get("status") == "ok":
                 trailer = {**old, "last_error": str(exc)[:200], "checked_at": now}
             else:
@@ -419,78 +466,95 @@ class Pipeline:
             if cand is not None:
                 trailer = {"status": "ok", "source": "youtube", "video": cand.to_dict(), "updated_at": now,
                            "checked_at": now}
+            elif old and old.get("status") == "ok":
+                trailer = {**old, "last_error": "новый поиск не нашёл трейлер, оставлен прежний", "checked_at": now}
             else:
                 trailer = {"status": "none", "updated_at": now, "checked_at": now}
         self.db.set_json(game.id, "trailer", trailer)
 
-    def find_letsplay(self, title: str) -> dict:
+    def find_letsplay(self, title: str, release_date: str | None = None) -> dict:
         now = iso(self.clock())
-        candidates = self.yt.find_letsplays(title)
+        candidates = self.yt.find_letsplays(title, release_date)
+        stats = getattr(self.yt, "last_stats", None) or {}
         top = [c.to_dict() for c in candidates[:5]]
         if not candidates:
+            if stats.get("title_mismatch"):
+                note = (f"Летсплеи по игре на YouTube есть, но ни в одном названии нет полного названия «{title}». "
+                        "Проверка строгая, чтобы не взять ролик другой части серии. Проверим снова через сутки")
+            else:
+                note = ("На YouTube не нашлось летсплеев длиннее 20 минут с названием игры в заголовке. "
+                        "Проверим снова через сутки")
             return {"status": "no_video", "method": "none", "candidates": [], "updated_at": now, "checked_at": now,
-                    "note": "На YouTube не нашлось подходящих летсплеев длиннее 10 минут"}
-        checked = []
-        if self.settings.youtube_captions:
-            for cand in candidates[: self.settings.youtube_max_candidates]:
-                self._step("YouTube: расшифровка", f"{title} / {cand.video_id}")
+                    "note": note, "search": stats}
+        captions = self.settings.youtube_captions
+        checked, stt_notes, skipped = [], [], []
+        stt_reasons_seen = set()
+        for cand in candidates[: self.settings.youtube_max_candidates]:
+            text = lang = speech = None
+            if captions:
+                self._step("YouTube: субтитры", f"{title} / {cand.video_id}")
                 try:
                     text, lang = self.yt.transcript(cand.video_id)
                 except TranscriptUnavailable as exc:
-                    checked.append({"video_id": cand.video_id, "reason": str(exc)})
-                    log.info("No transcript for %s (%s): %s", cand.video_id, title, exc)
-                    continue
-                self._refine(cand)
-                self._step("LLM: заключение по летсплею", title)
-                result, method, error = self._conclude(title, cand, text, "transcript")
-                if result is None:
-                    result, method = extractive_transcript_summary(text), "extractive-transcript"
-                return {"status": "ok", "method": method, "video": cand.to_dict(), "transcript_method": "captions",
-                        "transcript_chars": len(text), "transcript_lang": lang,
-                        "transcript_excerpt": sample_transcript(text, 6000), "checked": checked, "candidates": top,
-                        "updated_at": now, "checked_at": now, "error": error, **result}
-
-        stt_notes = []
-        for cand in candidates[: self.settings.youtube_max_candidates]:
-            speech, reason, attempted = self._speech(title, cand)
+                    checked.append({"video_id": cand.video_id, "reason": str(exc), "code": exc.code})
+                    log.info("Субтитров нет у %s (%s): %s", cand.video_id, title, exc)
+            if text is None:
+                speech, reason, attempted = self._speech(title, cand)
+                if speech is not None:
+                    text, lang = speech.text, speech.language
+                elif reason and (attempted or reason not in stt_reasons_seen):
+                    stt_reasons_seen.add(reason)
+                    stt_notes.append({"video_id": cand.video_id, "reason": reason} if attempted else {"reason": reason})
+            if text is None:
+                skipped.append({"video_id": cand.video_id, "reason": NO_TEXT})
+                continue
+            source = "whisper" if speech is not None else "transcript"
+            if not looks_like_commentary(text):
+                skipped.append({"video_id": cand.video_id, "reason": NO_COMMENTARY_TEXT})
+                log.info("Ролик %s (%s): в тексте почти нет речи автора, берём следующий", cand.video_id, title)
+                continue
+            self._refine(cand)
+            self._step("LLM: заключение по летсплею", title)
+            result, method, error = self._conclude(title, cand, text, source)
+            if result is not None and not result.get("has_commentary"):
+                skipped.append({"video_id": cand.video_id, "reason": NO_COMMENTARY_LLM})
+                log.info("Ролик %s (%s): LLM не нашла комментариев автора, берём следующий", cand.video_id, title)
+                continue
+            if result is None:
+                result, method = extractive_transcript_summary(text), f"extractive-{source}"
+            record = {"status": "ok", "method": method, "video": cand.to_dict(),
+                      "transcript_method": "whisper" if speech is not None else "captions",
+                      "transcript_chars": len(text), "transcript_lang": lang,
+                      "transcript_excerpt": sample_transcript(text, 6000), "checked": checked,
+                      "stt_checked": stt_notes, "skipped": skipped, "passed_over": self._passed_over(top, skipped),
+                      "candidates": top, "updated_at": now, "checked_at": now, "error": error, **result}
             if speech is not None:
-                self._refine(cand)
-                self._step("LLM: заключение по летсплею", title)
-                result, method, error = self._conclude(title, cand, speech.text, "whisper")
-                if result is None:
-                    result, method = extractive_transcript_summary(speech.text), "extractive-whisper"
-                return {"status": "ok", "method": method, "video": cand.to_dict(), "transcript_method": "whisper",
-                        "transcript_chars": len(speech.text), "transcript_lang": speech.language,
-                        "transcript_excerpt": sample_transcript(speech.text, 6000), "stt": speech.meta(),
-                        "checked": checked, "stt_checked": stt_notes, "candidates": top, "updated_at": now,
-                        "checked_at": now, "error": error, **result}
-            if reason:
-                stt_notes.append({"video_id": cand.video_id, "reason": reason} if attempted else {"reason": reason})
-            if not attempted:
-                break
+                record["stt"] = speech.meta()
+            return record
 
         best = candidates[0]
         self._refine(best)
-        stt_note = "; ".join(f"{n['video_id']}: {n['reason']}" if "video_id" in n else n["reason"] for n in stt_notes)
-        parts = []
-        if checked:
-            parts.append("субтитры: " + "; ".join(f"{c['video_id']}: {c['reason']}" for c in checked))
-        elif not self.settings.youtube_captions:
-            parts.append("субтитры YouTube не запрашивались (YOUTUBE_CAPTIONS=0)")
-        if stt_note:
-            parts.append(f"Whisper: {stt_note}")
-        note = f"Расшифровка недоступна ({'; '.join(parts)})" if parts else "Расшифровка недоступна"
+        note = failure_note(checked, stt_notes, skipped, captions)
+        base = {"status": "no_transcript", "video": best.to_dict(), "checked": checked, "stt_checked": stt_notes,
+                "skipped": skipped, "candidates": top, "updated_at": now, "checked_at": now, "note": note}
         if best.description:
             text = f"Название: {best.title}\nОписание: {best.description[:3000]}"
             result, method, error = self._conclude(title, best, text, "description")
             if result is None:
                 result = {"summary": best.description[:600], "pros": [], "cons": [], "verdict": ""}
                 method = "description"
-            return {"status": "no_transcript", "method": method, "video": best.to_dict(), "checked": checked,
-                    "candidates": top, "updated_at": now, "checked_at": now, "note": note, "error": error,
-                    **result}
-        return {"status": "no_transcript", "method": "none", "video": best.to_dict(), "checked": checked,
-                "candidates": top, "updated_at": now, "checked_at": now, "note": note}
+            return {**base, "method": method, "error": error, **result}
+        return {**base, "method": "none"}
+
+    @staticmethod
+    def _passed_over(top: list[dict], skipped: list[dict]) -> list[dict]:
+        info = {c["video_id"]: c for c in top}
+        out = []
+        for s in skipped:
+            c = info.get(s["video_id"], {})
+            out.append({"video_id": s["video_id"], "title": c.get("title"), "views": c.get("views"),
+                        "reason": s["reason"]})
+        return out
 
     def _speech(self, title: str, cand: VideoCandidate) -> tuple[SpeechResult | None, str | None, bool]:
         if self.stt is None:
@@ -506,17 +570,17 @@ class Pipeline:
         try:
             return self.stt.transcribe_video(cand.video_id), None, True
         except SpeechUnavailable as exc:
-            log.warning("Whisper for %s (%s) gave no text: %s", title, cand.video_id, exc)
+            log.warning("Whisper для %s (%s) не дал текста: %s", title, cand.video_id, exc)
             return None, str(exc)[:200], True
         except Exception as exc:
-            log.exception("Whisper for %s (%s) crashed", title, cand.video_id)
-            return None, exc.__class__.__name__, True
+            log.exception("Whisper для %s (%s) упал", title, cand.video_id)
+            return None, f"внутренняя ошибка распознавания ({exc.__class__.__name__})", True
 
     def _refine(self, cand) -> None:
         try:
             details = self.yt.watch_details(cand.video_id)
         except Exception as exc:
-            log.info("Watch page for %s unavailable: %s", cand.video_id, exc)
+            log.info("Страница ролика %s недоступна: %s", cand.video_id, exc)
             return
         if not details:
             return
@@ -529,15 +593,20 @@ class Pipeline:
     def _conclude(self, title: str, cand, text: str, source: str):
         if self.llm is None:
             return None, None, "LLM отключена"
+        if source == "description":
+            validator = validate_description_json
+        else:
+            def validator(value):
+                return validate_letsplay_json(value, text)
         try:
             result = self.llm.ask_json(
                 lambda budget: build_letsplay_prompt(title, cand.title, cand.channel, text, source, budget),
-                validate_letsplay_json)
+                validator)
             return result, f"llm-{source}", None
         except (LLMSkipped, LLMDisabled) as exc:
             return None, None, str(exc)[:200]
         except LLMError as exc:
-            log.warning("LLM let's play conclusion for %s failed: %s", title, exc)
+            log.warning("LLM не написала заключение по летсплею для %s: %s", title, exc)
             return None, None, str(exc)[:200]
 
     def backfill_llm(self, skip_ids: set[int], limit: int, deadline: datetime | None = None) -> int:
@@ -559,7 +628,7 @@ class Pipeline:
                     continue
                 new = summarize_reviews(self.llm, g["title"], kind, reviews, old.get("review_count") or len(reviews))
                 if new.get("method") != "llm":
-                    log.info("Backfill of %s summary for %s failed, moving on", kind, g["slug"])
+                    log.info("Досчёт резюме (%s) для %s не удался, идём дальше", kind, g["slug"])
                     continue
                 self.db.set_json(g["id"], column, new)
                 upgraded += 1
@@ -574,12 +643,18 @@ class Pipeline:
                 source = TRANSCRIPT_EXTRACTIVE[lp["method"]]
                 result, method, _ = self._conclude(g["title"], cand, lp["transcript_excerpt"], source)
             elif lp.get("method") == "description" and v.get("description"):
+                source = "description"
                 text = f"Название: {cand.title}\nОписание: {v['description'][:3000]}"
-                result, method, _ = self._conclude(g["title"], cand, text, "description")
+                result, method, _ = self._conclude(g["title"], cand, text, source)
             else:
                 continue
             if result is None:
-                log.info("Backfill of the let's play conclusion for %s failed, moving on", g["slug"])
+                log.info("Досчёт заключения по летсплею для %s не удался, идём дальше", g["slug"])
+                continue
+            if source != "description" and not result.get("has_commentary"):
+                log.info("Досчёт для %s: LLM не нашла комментариев автора, летсплей перепроверим поиском", g["slug"])
+                lp.update(llm_no_commentary=True, checked_at=iso(self.clock()))
+                self.db.set_json(g["id"], "letsplay", lp)
                 continue
             lp.update(result, method=method, error=None, updated_at=iso(self.clock()))
             self.db.set_json(g["id"], "letsplay", lp)

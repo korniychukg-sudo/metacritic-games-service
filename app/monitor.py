@@ -5,6 +5,8 @@ from datetime import datetime, timezone, tzinfo
 
 from .config import iso, utcnow
 
+TRIGGER_LABELS = {"manual": "вручную", "schedule": "по расписанию", "startup": "при старте"}
+IDLE_DETAIL = "с момента старта сервиса запросов не было"
 WORKER_TITLES = {
     "scheduler": "Планировщик",
     "pipeline": "Обработчик игр",
@@ -23,7 +25,9 @@ class Monitor:
         self._log: deque = deque(maxlen=log_size)
         self._log_seq = 0
         self.workers: dict[str, dict] = {
-            name: {"name": name, "title": title, "status": "idle", "detail": "", "updated_at": iso(utcnow())}
+            name: {"name": name, "title": title, "status": "idle",
+                   "detail": IDLE_DETAIL if name in ("metacritic", "youtube", "llm") else "",
+                   "updated_at": iso(utcnow())}
             for name, title in WORKER_TITLES.items()
         }
         self.counters = {

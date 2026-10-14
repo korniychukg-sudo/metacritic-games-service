@@ -196,9 +196,12 @@ def test_audio_source_rejects_unusable_videos(tmp_path, info, message):
 
 def test_audio_source_reports_extractor_errors(tmp_path):
     error = Exception("\x1b[0;31mERROR:\x1b[0m [youtube] abcdefghijk: Sign in to confirm you're not a bot")
-    with pytest.raises(SpeechUnavailable, match="Sign in to confirm") as info:
+    with pytest.raises(SpeechUnavailable, match="YouTube просит подтвердить, что запрос не от бота") as info:
         YtDlpAudioSource(ydl_factory=FakeYDL({}, raise_extract=error)).fetch("abcdefghijk", str(tmp_path), 60)
-    assert "\x1b" not in str(info.value)
+    assert "\x1b" not in str(info.value) and "Sign in" not in str(info.value)
+    other = Exception("ERROR: [youtube] abcdefghijk: Unsupported container quirk")
+    with pytest.raises(SpeechUnavailable, match="Unsupported container quirk"):
+        YtDlpAudioSource(ydl_factory=FakeYDL({}, raise_extract=other)).fetch("abcdefghijk", str(tmp_path), 60)
 
 
 def test_decode_audio_resamples_to_16k_mono_and_caps_the_length(tmp_path):
@@ -316,7 +319,7 @@ def test_no_speech_does_not_count_as_a_failure_of_the_service(settings):
     for vid in ("abcdefghijk", "bbcdefghijk", "cbcdefghijk"):
         with pytest.raises(NoSpeech):
             stt.transcribe_video(vid)
-    assert stt.available and stt.failures == 0 and stt.used == 3
+    assert stt.unavailable_reason() is None and stt.failures == 0 and stt.used == 3
 
 
 def test_transcriber_stops_at_the_time_budget():
@@ -384,11 +387,11 @@ def test_speech_to_text_limits_runs_and_blocks_after_repeated_failures(settings)
     stt.begin_run()
     stt.transcribe_video("abcdefghijk")
     stt.transcribe_video("bbcdefghijk")
-    assert not stt.available and "лимит" in stt.unavailable_reason()
+    assert stt.unavailable_reason() and "лимит" in stt.unavailable_reason()
     with pytest.raises(SpeechUnavailable, match="лимит"):
         stt.transcribe_video("cbcdefghijk")
     stt.begin_run()
-    assert stt.available
+    assert stt.unavailable_reason() is None
 
     settings.stt_max_per_run = 10
     failing = make_stt(settings, FakeAudioSource(error=SpeechUnavailable("HTTP 429")))
@@ -399,7 +402,7 @@ def test_speech_to_text_limits_runs_and_blocks_after_repeated_failures(settings)
     assert "до конца запуска" in failing.unavailable_reason()
     assert len(failing.source.calls) == 2
     failing.begin_run()
-    assert failing.available
+    assert failing.unavailable_reason() is None
 
 
 def test_fatal_errors_block_whisper_for_the_rest_of_the_run(settings):
@@ -407,7 +410,7 @@ def test_fatal_errors_block_whisper_for_the_rest_of_the_run(settings):
     stt.begin_run()
     with pytest.raises(SpeechFatal):
         stt.transcribe_video("abcdefghijk")
-    assert not stt.available and "не загрузилась" in stt.unavailable_reason()
+    assert stt.unavailable_reason() and "не загрузилась" in stt.unavailable_reason()
 
 
 def test_disabled_or_bad_ids_never_touch_the_network(settings):

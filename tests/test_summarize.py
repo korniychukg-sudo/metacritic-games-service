@@ -117,3 +117,86 @@ def test_validator_rejects_english_answers():
         raise AssertionError
     ok = validate_review_json({"likes": ["Отличная боёвка в духе Sekiro"], "dislikes": [], "verdict": "Хорошо"})
     assert ok["likes"]
+
+
+def test_russian_check_runs_per_item():
+    from app.summarize import is_russian
+
+    try:
+        validate_review_json({"likes": ["Красивые пейзажи", "Отличная музыка"],
+                              "dislikes": ["botched remaster process", "use of AI slop"],
+                              "verdict": "Игроки разочарованы переизданием, хотя графика и музыка хороши."})
+    except LLMError as exc:
+        assert "botched remaster process" in str(exc)
+    else:
+        raise AssertionError
+    assert is_russian("Поддержка Steam Deck") and is_russian("Режим Photo Mode") and is_russian("5")
+    assert not is_russian("Solid game") and not is_russian("use of AI slop и всё")
+
+
+KH_EXCERPT = ("you know Have you heard of the ancient keyblade war? Huh? Of course I have. Long ago, keyblade "
+              "wielders waged a war over the ownership of light. Yeah, the master's favorite story. ") * 6
+
+
+def test_letsplay_validator_drops_items_about_the_video_and_unverified_quotes():
+    from app.summarize import validate_letsplay_json
+
+    value = {"has_commentary": True,
+             "evidence": ["Of course I have. Long ago, keyblade wielders waged a war", "I think this remaster is amazing"],
+             "summary": "Автор ролика проходит пролог.",
+             "pros": ["Позитивный настрой и энтузиазм автора", "Красивые арены", "Подробный обзор в видео"],
+             "cons": ["Не указаны конкретные проблемы", "Отсутствие подробного обзора", "Долгие загрузки"],
+             "verdict": "Хорошая коллекция."}
+    out = validate_letsplay_json(value, KH_EXCERPT)
+    assert out["pros"] == ["Красивые арены"] and out["cons"] == ["Долгие загрузки"]
+    assert out["evidence"] == ["Of course I have. Long ago, keyblade wielders waged a war"]
+    assert out["has_commentary"] is True
+
+
+def test_letsplay_without_commentary_is_reported_not_invented():
+    from app.summarize import validate_letsplay_json
+
+    out = validate_letsplay_json({"has_commentary": False, "evidence": [], "summary": "", "pros": [], "cons": []},
+                                 KH_EXCERPT)
+    assert out["has_commentary"] is False and out["pros"] == [] and out["summary"] == ""
+    made_up = validate_letsplay_json({"has_commentary": "true", "evidence": ["Автор хвалит производительность"],
+                                      "summary": "Автор ценит производительность на PS5 Pro.",
+                                      "pros": ["Производительность"]}, KH_EXCERPT)
+    assert made_up["has_commentary"] is False and made_up["evidence_rejected"] == 1
+    try:
+        validate_letsplay_json({"has_commentary": True, "evidence": ["Of course I have. Long ago, keyblade wielders"],
+                                "summary": "Great prologue", "pros": ["Nice"]}, KH_EXCERPT)
+    except LLMError:
+        pass
+    else:
+        raise AssertionError
+
+
+def test_commentary_heuristic_rejects_music_and_noise_only():
+    from app.summarize import commentary_density, looks_like_commentary
+    from app.youtube import transcript_to_text
+
+    music = transcript_to_text([{"text": "Heat. Heat. Heat. [bell] Heat. Heat. " * 50 + "wind rain " * 200}])
+    assert not looks_like_commentary(music)
+    talk = "Okay guys, I really love how this game feels, let's go and I think we should try the next race. " * 20
+    assert looks_like_commentary(talk) and commentary_density(talk) > 100
+    assert looks_like_commentary("short text")
+
+
+def test_description_prompt_and_validator_never_attribute_opinions():
+    from app.summarize import build_letsplay_prompt, validate_description_json
+
+    msgs = build_letsplay_prompt("Game", "Video", "Chan", "Название: x\nОписание: Full demo walkthrough", "description")
+    assert "Это описание ролика, а не речь его автора" in msgs[-1]["content"]
+    assert "pros" not in msgs[-1]["content"] and "has_commentary" not in msgs[-1]["content"]
+    assert "описания роликов" in msgs[0]["content"]
+    out = validate_description_json({"summary": "Судя по описанию ролика, это полное демо.", "pros": ["x"]})
+    assert out == {"summary": "Судя по описанию ролика, это полное демо.", "pros": [], "cons": [], "verdict": ""}
+    transcript = build_letsplay_prompt("Game", "Video", "Chan", "I love it. " * 50, "transcript")
+    assert '"has_commentary"' in transcript[-1]["content"] and "только о самой игре" in transcript[-1]["content"]
+
+
+def test_review_prompt_asks_for_game_properties_only():
+    g = game()
+    body = build_review_prompt(g.title, "critic", g.critic_reviews)[-1]["content"]
+    assert "только свойства самой игры" in body

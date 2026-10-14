@@ -102,8 +102,9 @@ def _review_line(r: Review, max_chars: int = 380) -> str:
 
 REVIEW_SYSTEM = "Ты аналитик игровых отзывов. Пиши по-русски, кратко, в третьем лице, только по тексту отзывов."
 REVIEW_TASK = (
-    "\n\nЧто нравится и что не нравится? Все пункты и вывод пиши на русском языке, даже если отзывы "
-    "на английском. Ответь только JSON: "
+    "\n\nЧто нравится и что не нравится? Пункты — только свойства самой игры (геймплей, сюжет, графика, "
+    "техническое состояние, контент, цена), а не то, кто и как её оценил. Все пункты и вывод пиши на русском "
+    "языке, даже если отзывы на английском. Ответь только JSON: "
     '{"likes": ["3-5 коротких пунктов"], "dislikes": ["0-5 пунктов"], "verdict": "одно предложение"}'
 )
 
@@ -147,12 +148,20 @@ def _str_list(value, limit: int = 6) -> list[str]:
     return out[:limit]
 
 
-def ensure_russian(*parts) -> None:
-    text = " ".join(" ".join(p) if isinstance(p, list) else str(p or "") for p in parts)
+def is_russian(text: str) -> bool:
+    text = str(text or "")
     cyr = len(re.findall(r"[а-яё]", text, re.I))
     lat = len(re.findall(r"[a-z]", text, re.I))
-    if lat > cyr:
-        raise LLMError("ответ не на русском языке")
+    if not cyr:
+        return not re.search(r"[a-z]{2,}", text, re.I)
+    return lat <= 2 * cyr
+
+
+def ensure_russian(*parts) -> None:
+    for part in parts:
+        for item in (part if isinstance(part, list) else [part]):
+            if not is_russian(item):
+                raise LLMError(f"ответ не на русском языке: «{str(item)[:80]}»")
 
 
 def validate_review_json(value: dict) -> dict:
@@ -187,7 +196,7 @@ def summarize_reviews(llm: LLMClient | None, title: str, kind: str, reviews: lis
             fallback["note"] = SKIP_NOTES[type(exc)]
             return {**base, **fallback}
         except LLMError as exc:
-            log.warning("LLM summary (%s) for %s failed, using extractive: %s", kind, title, exc)
+            log.warning("Резюме (%s) для %s без LLM, показаны цитаты: %s", kind, title, exc)
             fallback = extractive_review_summary(reviews, kind, total)
             fallback["error"] = str(exc)[:200]
             return {**base, **fallback}
@@ -256,39 +265,129 @@ def condense_transcript(text: str, max_chars: int) -> str:
     return _clip(" ".join(out), max_chars)
 
 
+COMMENTARY_MARKERS = {
+    "i", "i'm", "im", "i've", "i'll", "i'd", "me", "my", "we", "we're", "let's", "lets", "guys", "chat",
+    "subscribe", "episode", "video", "channel", "honestly", "gonna", "okay",
+    "я", "мне", "меня", "мой", "моя", "мы", "нам", "ребята", "давайте", "друзья", "народ", "короче", "видео",
+    "канал", "стрим", "чат", "щас",
+}
+MIN_COMMENTARY_PER_1000 = 10
+
+
+def commentary_density(text: str) -> float:
+    words = re.findall(r"[\w']+", (text or "").lower())
+    if not words:
+        return 0.0
+    return 1000 * sum(1 for w in words if w in COMMENTARY_MARKERS) / len(words)
+
+
+def looks_like_commentary(text: str) -> bool:
+    words = re.findall(r"[\w']+", text or "")
+    if len(words) < 150:
+        return True
+    return commentary_density(text) >= MIN_COMMENTARY_PER_1000
+
+
 LETSPLAY_SYSTEM = (
-    "Ты пишешь заключения об играх по летсплеям. По-русски, в третьем лице («автор ролика»). "
+    "Ты пишешь заключения об играх по речи автора летсплея. По-русски, в третьем лице («автор ролика»). "
+    "Опирайся только на слова самого автора: диалоги персонажей игры, музыка и звуки не являются его мнением. "
     "Игнорируй рекламу, спонсоров, просьбы подписаться. Не выдумывай."
 )
 LETSPLAY_TASK = (
-    "\n\nКак блогер оценивает игру, что понравилось и что нет? Пиши только на русском языке, даже если "
-    "речь блогера на английском. Ответь только JSON: "
-    '{"summary": "2-4 предложения", "pros": ["..."], "cons": ["..."], "verdict": "одно предложение"}'
+    "\n\nСначала определи, звучит ли в тексте голос самого автора ролика: он обращается к зрителям, рассказывает, "
+    "что делает, комментирует игру. Реплики персонажей игры, музыка и шум не считаются. Если голос автора есть, "
+    "has_commentary=true, а в evidence дай 2-3 короткие дословные цитаты автора на языке оригинала, лучше те, где "
+    "он оценивает игру. Затем только по словам автора: summary — как он оценивает игру и что в ней показывает "
+    "(2-4 предложения); pros и cons — только о самой игре (геймплей, сюжет, графика, техническое состояние, "
+    "контент) и только то, что сказал автор, иначе пустой список; не пиши про самого автора, его настрой, ролик "
+    "или полноту обзора. Если голоса автора нет, верни has_commentary=false и пустые поля. Все поля, кроме "
+    "evidence, пиши на русском языке. Ответь только JSON: "
+    '{"has_commentary": true, "evidence": ["..."], "summary": "...", "pros": ["..."], "cons": ["..."], '
+    '"verdict": "одно предложение"}'
+)
+DESCRIPTION_SYSTEM = (
+    "Ты кратко пересказываешь описания роликов YouTube об играх. По-русски, только по тексту описания. "
+    "Не выдумывай."
+)
+DESCRIPTION_TASK = (
+    "\n\nЭто описание ролика, а не речь его автора. В 1-3 предложениях перескажи, что показано в ролике и что "
+    "известно об игре из описания. Не приписывай автору мнений об игре и не придумывай плюсы и минусы, пиши "
+    "«судя по описанию ролика». Ссылки, рекламу и просьбы подписаться пропусти. Ответь только JSON на русском: "
+    '{"summary": "1-3 предложения"}'
+)
+META_ITEM = re.compile(
+    r"(?<![а-яё])(автор[а-яё]*|ролик[а-яё]*|видео(?![а-яё])|блогер[а-яё]*|ведущ(ий|его|ему|им|ем)(?![а-яё])"
+    r"|стример[а-яё]*|канал[а-яё]*|обзор[а-яё]*|зрител[а-яё]*|летспле[а-яё]*)"
+    r"|не\s+(указан|упомина|упомян|отмеч|назван|рассказ|описан)",
+    re.I,
 )
 
 
 def build_letsplay_prompt(game_title: str, video_title: str, channel: str | None, text: str,
                           source: str = "transcript", max_chars: int = 9000) -> list[dict]:
     by = f", канал {channel}" if channel else ""
+    system, task = LETSPLAY_SYSTEM, LETSPLAY_TASK
     if source == "transcript":
         head = (f"Игра «{game_title}». Ролик «{video_title}»{by}. "
-                "Ключевые фрагменты автоматической расшифровки речи блогера:\n")
+                "Ключевые фрагменты автоматической расшифровки звуковой дорожки ролика:\n")
     elif source == "whisper":
-        head = (f"Игра «{game_title}». Ролик «{video_title}»{by}. Ключевые фрагменты речи блогера из начала "
-                "ролика, распознанной моделью Whisper (возможны ошибки распознавания в именах и терминах):\n")
+        head = (f"Игра «{game_title}». Ролик «{video_title}»{by}. Ключевые фрагменты речи из начала ролика, "
+                "распознанной моделью Whisper (возможны ошибки распознавания в именах и терминах):\n")
     else:
-        head = f"Игра «{game_title}». Ролик «{video_title}»{by}. Расшифровки нет, есть только описание ролика:\n"
-    available = max(300, max_chars - len(LETSPLAY_SYSTEM) - len(head) - len(LETSPLAY_TASK))
+        system, task = DESCRIPTION_SYSTEM, DESCRIPTION_TASK
+        head = f"Игра «{game_title}». Ролик «{video_title}»{by}. Описание ролика на YouTube:\n"
+    available = max(300, max_chars - len(system) - len(head) - len(task))
     body = condense_transcript(text, available) if source in ("transcript", "whisper") else _clip(text, available)
-    return [{"role": "system", "content": LETSPLAY_SYSTEM}, {"role": "user", "content": head + body + LETSPLAY_TASK}]
+    return [{"role": "system", "content": system}, {"role": "user", "content": head + body + task}]
 
 
-def validate_letsplay_json(value: dict) -> dict:
+def _words(text: str) -> list[str]:
+    return [w for w in re.findall(r"\w+", (text or "").lower()) if len(w) >= 3]
+
+
+def verified_quotes(quotes: list[str], text: str | None) -> list[str]:
+    if text is None:
+        return quotes
+    vocab = set(_words(text))
+    out = []
+    for q in quotes:
+        words = _words(q)
+        if len(words) >= 3 and sum(1 for w in words if w in vocab) >= 0.6 * len(words):
+            out.append(q)
+    return out
+
+
+def _flag(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "да", "1")
+    return bool(value)
+
+
+def about_the_game(items: list[str]) -> list[str]:
+    return [x for x in items if not META_ITEM.search(x)]
+
+
+def validate_letsplay_json(value: dict, text: str | None = None) -> dict:
     summary = str(value.get("summary") or "").strip()
-    pros = _str_list(value.get("pros") or value.get("likes"))
-    cons = _str_list(value.get("cons") or value.get("dislikes"))
+    pros = about_the_game(_str_list(value.get("pros") or value.get("likes")))
+    cons = about_the_game(_str_list(value.get("cons") or value.get("dislikes")))
     verdict = str(value.get("verdict") or "").strip()
+    raw_evidence = _str_list(value.get("evidence") or value.get("quotes"), limit=4)
+    evidence = verified_quotes(raw_evidence, text)
+    has_commentary = _flag(value.get("has_commentary", True)) and bool(evidence)
+    if not has_commentary:
+        return {"has_commentary": False, "evidence": [], "summary": "", "pros": [], "cons": [], "verdict": "",
+                "evidence_rejected": len(raw_evidence) - len(evidence)}
     if not summary and not pros and not cons:
         raise LLMError("пустое заключение")
     ensure_russian(summary, pros, cons, verdict)
-    return {"summary": summary, "pros": pros, "cons": cons, "verdict": verdict}
+    return {"has_commentary": True, "evidence": evidence, "summary": summary, "pros": pros, "cons": cons,
+            "verdict": verdict}
+
+
+def validate_description_json(value: dict) -> dict:
+    summary = str(value.get("summary") or "").strip()
+    if not summary:
+        raise LLMError("пустой пересказ описания")
+    ensure_russian(summary)
+    return {"summary": summary, "pros": [], "cons": [], "verdict": ""}

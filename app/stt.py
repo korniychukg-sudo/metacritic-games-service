@@ -43,9 +43,25 @@ def min_speech_seconds(audio_seconds: float) -> float:
     return max(15.0, min(60.0, audio_seconds * 0.07))
 
 
+YTDLP_REASONS = (
+    ("Sign in to confirm", "YouTube просит подтвердить, что запрос не от бота"),
+    ("confirm your age", "у ролика возрастное ограничение"),
+    ("Private video", "ролик приватный"),
+    ("members-only", "ролик только для спонсоров канала"),
+    ("Video unavailable", "ролик недоступен"),
+    ("This live event", "ролик ещё не вышел"),
+    ("HTTP Error 403", "YouTube отказал в доступе (HTTP 403)"),
+    ("HTTP Error 429", "YouTube ограничил частоту запросов (HTTP 429)"),
+    ("timed out", "YouTube не ответил вовремя"),
+)
+
+
 def short_error(exc, limit: int = 200) -> str:
     text = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).strip()
     text = re.sub(r"^ERROR:\s*", "", text) or exc.__class__.__name__
+    for marker, reason in YTDLP_REASONS:
+        if marker.lower() in text.lower():
+            return reason
     return text[:limit]
 
 
@@ -194,7 +210,7 @@ class YtDlpAudioSource:
             ext = re.sub(r"[^a-z0-9]", "", str(fmt.get("ext") or "").lower()) or "audio"
             path = os.path.join(dest_dir, f"{video_id}.{ext}")
             got, complete = self._download(ydl, fmt, need, path)
-        log.info("Audio for %s: format %s, %.1f of %.1f MB", video_id, fmt.get("format_id"), got / 1048576,
+        log.info("Аудио ролика %s: формат %s, скачано %.1f из %.1f МБ", video_id, fmt.get("format_id"), got / 1048576,
                  need / 1048576)
         return AudioFile(path=path, format_id=str(fmt.get("format_id") or "?"), ext=ext,
                          codec=str(fmt.get("acodec") or "?"), abr=fmt.get("abr") or fmt.get("tbr"), bytes=got,
@@ -212,7 +228,7 @@ class YtDlpAudioSource:
                     data, whole = self._fetch_range(ydl, url, headers, host, got, end, need)
                 except SpeechUnavailable as exc:
                     if got >= MIN_PARTIAL_BYTES:
-                        log.info("Audio download stopped at %.1f MB, using what arrived: %s", got / 1048576, exc)
+                        log.info("Загрузка аудио остановилась на %.1f МБ, используем то, что пришло: %s", got / 1048576, exc)
                         return got, False
                     raise
                 if not data:
@@ -248,7 +264,7 @@ class YtDlpAudioSource:
             except Exception as exc:
                 last = exc
                 status = getattr(exc, "status", None)
-                log.info("Audio range %d-%d failed (%s), attempt %d", start, end, short_error(exc), attempt + 1)
+                log.info("Кусок аудио %d-%d не скачался (%s), попытка %d", start, end, short_error(exc), attempt + 1)
                 if status in NO_RETRY_STATUSES:
                     break
                 if attempt < self.retries:
@@ -291,7 +307,7 @@ def decode_audio(path: str, max_seconds: float):
     except Exception as exc:
         if filled == 0:
             raise SpeechUnavailable(f"не удалось декодировать аудио: {short_error(exc)}") from exc
-        log.debug("Audio decode stopped at %.0f s: %s", filled / SAMPLE_RATE, exc)
+        log.debug("Декодирование аудио остановилось на %.0f с: %s", filled / SAMPLE_RATE, exc)
     return out[:filled]
 
 
@@ -314,7 +330,7 @@ def default_model_factory(name: str, model_dir: str, threads: int):
     except ValueError:
         raise
     except Exception:
-        log.info("Whisper model %s is not cached in %s yet, downloading it", name, model_dir)
+        log.info("Модели Whisper %s ещё нет в %s, скачиваем", name, os.path.basename(model_dir.rstrip(os.sep)))
     return WhisperModel(name, **kwargs)
 
 
@@ -355,7 +371,7 @@ class WhisperTranscriber:
                 except Exception as exc:
                     raise SpeechFatal(f"модель Whisper «{self.model_name}» не загрузилась: {short_error(exc)}") from exc
                 self.load_seconds = round(self.clock() - started, 1)
-                log.info("Whisper model %s loaded in %.1f s (%d threads)", self.model_name, self.load_seconds,
+                log.info("Модель Whisper %s загружена за %.1f с (потоков: %d)", self.model_name, self.load_seconds,
                          self.threads)
             return self._model
 
@@ -365,7 +381,7 @@ class WhisperTranscriber:
                 return
             self._model = None
         gc.collect()
-        log.info("Whisper model %s released", self.model_name)
+        log.info("Модель Whisper %s выгружена из памяти", self.model_name)
 
     def speech_spans(self, audio) -> list[tuple[int, int]]:
         window = VAD_WINDOW_SECONDS * SAMPLE_RATE
@@ -490,7 +506,6 @@ class SpeechToText:
         self.blocked: str | None = None
         self.done_total = 0
         self.failed_total = 0
-        self.last: SpeechResult | None = None
 
     def describe(self) -> str:
         return (f"Whisper «{self.model_name}» на CPU, первые {self.max_seconds // 60} мин аудио, "
@@ -512,10 +527,6 @@ class SpeechToText:
             return f"исчерпан лимит распознаваний за запуск ({self.max_per_run})"
         return None
 
-    @property
-    def available(self) -> bool:
-        return self.unavailable_reason() is None
-
     def begin_run(self) -> None:
         self.used = 0
         self.failures = 0
@@ -527,7 +538,7 @@ class SpeechToText:
         try:
             self.transcriber.release()
         except Exception:
-            log.exception("Could not release the Whisper model")
+            log.exception("Не удалось выгрузить модель Whisper")
 
     def _failed(self, exc: SpeechUnavailable) -> None:
         self.failed_total += 1
@@ -569,11 +580,11 @@ class SpeechToText:
                 raise NoSpeech(f"в первых {audio_seconds / 60:.0f} мин аудио почти нет речи "
                                f"({len(text)} символов)")
         except SpeechUnavailable as exc:
-            log.info("Whisper for %s failed: %s", video_id, exc)
+            log.info("Whisper для %s не дал текста: %s", video_id, exc)
             self._failed(exc)
             raise
         except Exception as exc:
-            log.exception("Whisper for %s crashed", video_id)
+            log.exception("Whisper для %s упал", video_id)
             err = SpeechUnavailable(f"{exc.__class__.__name__}: {short_error(exc)}")
             self._failed(err)
             raise err from exc
@@ -589,10 +600,9 @@ class SpeechToText:
                               complete=tr.complete and audio_file.complete)
         self.failures = 0
         self.done_total += 1
-        self.last = result
         speed = f", в {result.speed:g} раз быстрее реального времени" if result.speed else ""
         self._state("ok", f"последний ролик {video_id}: {audio_seconds / 60:.0f} мин аудио распознано за "
                           f"{tr.seconds:.0f} с{speed}, {len(text)} символов; всего роликов {self.done_total}")
-        log.info("Whisper %s for %s: %.0f s audio, %.0f s speech, %.1f s, %d chars, lang %s", self.model_name,
+        log.info("Whisper %s, ролик %s: аудио %.0f с, речи %.0f с, распознано за %.1f с, %d символов, язык %s", self.model_name,
                  video_id, audio_seconds, tr.speech_seconds, tr.seconds, len(text), tr.language)
         return result

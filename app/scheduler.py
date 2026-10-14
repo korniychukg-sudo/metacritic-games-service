@@ -74,7 +74,7 @@ class Scheduler:
     def _refresh_next(self, now: datetime) -> None:
         if self.next_run is None:
             self._set_next(initial_next_run(self.settings, self.db, now))
-            log.info("Scheduler started, next run at %s", iso(self.next_run))
+            log.info("Планировщик запущен, следующий запуск %s", self.next_run.astimezone(self.settings.day_tz).strftime("%d.%m %H:%M:%S"))
             return
         last_start = last_run_start(self.db)
         if last_start and last_start + interval_of(self.settings) > self.next_run:
@@ -85,14 +85,14 @@ class Scheduler:
         self.last_tick_at = now
         closed = self.db.close_stale_runs(now, self.settings.lease_ttl_seconds)
         if closed:
-            log.warning("Closed %d run(s) left running by a stopped process", closed)
+            log.warning("Закрыто запусков, оставшихся от остановленного процесса: %d", closed)
         self._refresh_next(now)
         if now < self.next_run:
             self._waiting_busy = False
             return "wait"
         if self.pipeline.running:
             if not self._waiting_busy:
-                log.info("Scheduled run is due but another run is in progress, waiting for it to finish")
+                log.info("Пора делать плановый запуск, но идёт другая обработка: ждём её окончания")
                 self.monitor.set_worker("scheduler", "waiting", "плановый запуск ждёт окончания текущей обработки")
                 self._waiting_busy = True
             return "busy"
@@ -107,7 +107,7 @@ class Scheduler:
         except AlreadyRunning:
             outcome = "busy"
         except Exception as exc:
-            log.exception("Scheduled run crashed")
+            log.exception("Плановый запуск упал")
             self.last_error = f"{exc.__class__.__name__}: {exc}"
             outcome = "crashed"
         after = self.clock()
@@ -127,7 +127,7 @@ class Scheduler:
                 self.last_error = None
                 remaining = (self.next_run - self.clock()).total_seconds() if self.next_run else self.poll_seconds
             except Exception as exc:
-                log.exception("Scheduler tick failed, retrying shortly")
+                log.exception("Сбой планировщика, повтор через несколько секунд")
                 self.last_error = f"{exc.__class__.__name__}: {exc}"
                 try:
                     self.monitor.set_worker("scheduler", "error", f"сбой планировщика: {exc}")

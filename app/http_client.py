@@ -83,7 +83,7 @@ class PoliteClient:
             except httpx.HTTPError as exc:
                 last_exc = HttpError(f"{exc.__class__.__name__}: {exc}" if str(exc) else exc.__class__.__name__)
                 self.report(host, False)
-                log.warning("GET %s failed (%s), attempt %d", url, exc.__class__.__name__, attempt + 1)
+                log.warning("GET %s не удался (%s), попытка %d", url, exc.__class__.__name__, attempt + 1)
             else:
                 if resp.status_code == 404:
                     self.report(host, True)
@@ -91,7 +91,7 @@ class PoliteClient:
                 if resp.status_code == 429 or resp.status_code >= 500:
                     last_exc = HttpError(f"HTTP {resp.status_code} for {url}")
                     self.report(host, False)
-                    log.warning("GET %s -> %d, attempt %d", url, resp.status_code, attempt + 1)
+                    log.warning("GET %s -> %d, попытка %d", url, resp.status_code, attempt + 1)
                     hinted = retry_after_seconds(resp.headers.get("retry-after"))
                     if hinted is not None:
                         wait = max(wait, hinted)

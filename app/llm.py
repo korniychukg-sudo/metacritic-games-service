@@ -125,7 +125,7 @@ class LLMClient:
     def begin_run(self) -> None:
         self.consecutive_failures = 0
         if self.circuit_open:
-            log.info("LLM circuit closed for the new run")
+            log.info("Новый запуск: LLM снова вызывается")
         self.circuit_open = False
 
     def _wait_turn(self) -> None:
@@ -164,7 +164,7 @@ class LLMClient:
                 except httpx.HTTPError as exc:
                     last_err = LLMError(f"{exc.__class__.__name__}")
                     self._report(False, self._clock() - started)
-                    log.warning("LLM call failed (%s), attempt %d/%d", exc.__class__.__name__, attempt + 1,
+                    log.warning("Вызов LLM не удался (%s), попытка %d из %d", exc.__class__.__name__, attempt + 1,
                                 self.retries)
                     continue
                 latency = self._clock() - started
@@ -178,7 +178,7 @@ class LLMClient:
                 if code in (402, 429) or code >= 500:
                     last_err = RateLimited(code, retry_after_seconds(resp.headers.get("retry-after")))
                     self._report(False, latency)
-                    log.warning("LLM call failed (HTTP %d%s), attempt %d/%d", code,
+                    log.warning("Вызов LLM не удался (HTTP %d%s), попытка %d из %d", code,
                                 ", лимит частоты" if code in (402, 429) else "", attempt + 1, self.retries)
                     continue
                 if code >= 400:
@@ -194,7 +194,7 @@ class LLMClient:
                     pass
                 if not content or not str(content).strip():
                     self._report(False, latency)
-                    log.warning("LLM returned an empty reply (finish_reason=%s, %.1f s)", finish, latency)
+                    log.warning("LLM вернула пустой ответ (finish_reason=%s, %.1f с)", finish, latency)
                     raise EmptyReply(f"пустой ответ модели (finish_reason={finish})")
                 self._report(True, latency)
                 return content
@@ -217,7 +217,7 @@ class LLMClient:
                 return value
             except LLMError as exc:
                 last = exc
-                log.warning("LLM returned unusable JSON: %s", exc)
+                log.warning("LLM вернула негодный JSON: %s", exc)
         raise LLMBadOutput(str(last))
 
     def ask_json(self, build, validator=None, attempts: int = 4) -> dict:
@@ -235,8 +235,8 @@ class LLMClient:
                 smaller = max(self.min_prompt_chars, int(budget * 0.6))
                 if smaller >= budget:
                     break
-                log.info("LLM %s, budget %d -> %d chars for this call",
-                         "returned empty replies" if isinstance(exc, EmptyReply) else "rejected the prompt size",
+                log.info("LLM %s, бюджет промпта для этого вызова %d -> %d символов",
+                         "вернула пустые ответы" if isinstance(exc, EmptyReply) else "отклонила размер промпта",
                          budget, smaller)
                 budget = smaller
                 continue
@@ -255,7 +255,7 @@ class LLMClient:
         self.consecutive_failures += 1
         if self.consecutive_failures >= self.failure_threshold and not self.circuit_open:
             self.circuit_open = True
-            log.warning("LLM failed %d times in a row (%s); quote-based summaries until the end of the run",
+            log.warning("LLM не ответила %d раз подряд (%s); до конца запуска резюме строятся из цитат",
                         self.consecutive_failures, err)
             if self.on_state:
                 try:

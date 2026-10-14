@@ -3,6 +3,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from urllib.parse import urlparse
 
 from .http_client import PoliteClient, SchemaError
@@ -31,12 +32,23 @@ EXCLUDE = re.compile(
     r"|\b(no|without)\s+(commentary|talking)\b|\bnocommentary\b|без\s+(комментариев|комментария|слов)",
     re.I,
 )
-PREFER = re.compile(
-    r"(let'?s\s*play|walkthrough|playthrough|gameplay|full\s+game|part\s*1|episode\s*1|прохождение|летсплей|стрим|stream)",
-    re.I,
-)
 STOP = {"the", "a", "an", "of", "and", "edition", "remastered", "remaster", "complete", "definitive", "deluxe",
         "game", "goty", "collection", "hd", "for"}
+EDITION_WORDS = {
+    "collection": "collection", "remaster": "remaster", "remastered": "remaster", "remake": "remake",
+    "complete": "complete", "definitive": "definitive", "edition": "edition", "deluxe": "deluxe", "goty": "goty",
+    "anniversary": "anniversary", "enhanced": "enhanced", "ultimate": "ultimate", "trilogy": "trilogy",
+    "director": "director", "directors": "director",
+}
+PRE_RELEASE = re.compile(
+    r"\b(demo|beta|alpha|playtest|early\s+access|early|preview|prologue)\b|демо|бета|альфа|ранн\w*\s+доступ",
+    re.I,
+)
+AGE_UNITS = {"s": 1 / 86400, "sec": 1 / 86400, "second": 1 / 86400, "min": 1 / 1440, "minute": 1 / 1440,
+             "h": 1 / 24, "hr": 1 / 24, "hour": 1 / 24, "d": 1, "day": 1, "w": 7, "wk": 7, "week": 7,
+             "mo": 30, "month": 30, "y": 365, "yr": 365, "year": 365}
+AGE = re.compile(r"(\d+)\s*(second|sec|minute|min|hour|hr|h|day|d|week|wk|w|month|mo|year|yr|y|s)s?\s+ago", re.I)
+SUBTITLE_SPLIT = re.compile(r"\s*[:~\u2013\u2014]\s*|\s+-\s+")
 
 
 @dataclass
@@ -50,6 +62,7 @@ class VideoCandidate:
     description: str | None = None
     live: bool = False
     queries: list[str] = field(default_factory=list)
+    base_game: bool = False
 
     @property
     def url(self) -> str:
@@ -71,14 +84,6 @@ def normalize(text: str) -> str:
 def title_tokens(title: str) -> list[str]:
     toks = [t for t in normalize(title).split() if t not in STOP]
     return toks or normalize(title).split()
-
-
-def title_overlap(game_title: str, video_title: str) -> float:
-    gt = title_tokens(game_title)
-    if not gt:
-        return 0.0
-    vt = set(normalize(video_title).split())
-    return sum(1 for t in gt if t in vt) / len(gt)
 
 
 def _split_words(title: str) -> tuple[set[str], set[str]]:
@@ -118,13 +123,38 @@ def title_matches(game_title: str, video_title: str) -> bool:
     if not _numbers_in_place(game_title, video_title):
         return False
     overlap = len(words & vt) / len(words)
-    parts = re.split(r"\s*[:\u2013\u2014]\s*|\s+-\s+", game_title, maxsplit=1)
+    parts = SUBTITLE_SPLIT.split(game_title, maxsplit=1)
     if len(parts) == 2:
         sub_words, _ = _split_words(parts[1])
         if sub_words and not sub_words <= vt:
             return False
         return overlap >= 0.5
     return overlap >= 0.75
+
+
+def edition_words(title: str) -> set[str]:
+    return {EDITION_WORDS[t] for t in normalize(title).split() if t in EDITION_WORDS}
+
+
+def edition_matches(game_title: str, video_title: str) -> bool:
+    return edition_words(game_title) <= edition_words(video_title)
+
+
+def parse_age_days(text: str | None) -> float | None:
+    m = AGE.search(text or "")
+    if not m:
+        return None
+    return int(m.group(1)) * AGE_UNITS[m.group(2).lower()]
+
+
+def is_released(release_date: str | None, today: date | None = None) -> bool:
+    if not release_date:
+        return False
+    try:
+        released = date.fromisoformat(str(release_date)[:10])
+    except ValueError:
+        return False
+    return released <= (today or date.today())
 
 
 def parse_duration(text: str | None) -> int | None:
@@ -184,6 +214,19 @@ def detect_block(html_text: str) -> str | None:
     return None
 
 
+def has_no_results_marker(data: dict) -> bool:
+    stack = [data]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            if "backgroundPromoRenderer" in cur:
+                return True
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return False
+
+
 def parse_search_html(html_text: str) -> list[VideoCandidate]:
     data = extract_initial_data(html_text)
     if data is None:
@@ -193,7 +236,9 @@ def parse_search_html(html_text: str) -> list[VideoCandidate]:
         raise SchemaError("на странице поиска YouTube нет ytInitialData (сменился формат страницы)")
     out: list[VideoCandidate] = []
     seen = set()
+    renderers = 0
     for vr in iter_video_renderers(data):
+        renderers += 1
         vid = vr.get("videoId")
         if not isinstance(vid, str) or not VIDEO_ID.match(vid) or vid in seen:
             continue
@@ -216,6 +261,8 @@ def parse_search_html(html_text: str) -> list[VideoCandidate]:
                 live=live,
             )
         )
+    if renderers == 0 and not has_no_results_marker(data):
+        raise SchemaError("на странице поиска YouTube нет videoRenderer (сменился формат выдачи)")
     return out
 
 
@@ -238,8 +285,8 @@ def parse_watch_html(html_text: str) -> dict | None:
     }
 
 
-def rank_candidates(game_title: str, candidates: list[VideoCandidate],
-                    min_seconds: int = 600) -> list[VideoCandidate]:
+def rank_candidates(game_title: str, candidates: list[VideoCandidate], min_seconds: int = 600,
+                    released: bool = False, stats: dict | None = None) -> list[VideoCandidate]:
     eligible = []
     for c in candidates:
         if c.live or c.views is None:
@@ -249,12 +296,31 @@ def rank_candidates(game_title: str, candidates: list[VideoCandidate],
         if EXCLUDE.search(c.title):
             continue
         if not title_matches(game_title, c.title):
+            if stats is not None:
+                stats["title_mismatch"] = stats.get("title_mismatch", 0) + 1
             continue
         eligible.append(c)
-    return sorted(eligible, key=lambda c: (not bool(PREFER.search(c.title)), -(c.views or 0)))
+    if stats is not None:
+        stats["found"] = len(candidates)
+        stats["eligible"] = len(eligible)
+    return sorted(eligible, key=lambda c: (released and bool(PRE_RELEASE.search(c.title)), -(c.views or 0)))
 
 
-def rank_trailers(game_title: str, candidates: list[VideoCandidate], max_seconds: int = 600) -> list[VideoCandidate]:
+def recent_enough(cand: VideoCandidate, release_date: str | None, today: date) -> bool:
+    age = parse_age_days(cand.published)
+    if age is None or not release_date:
+        return True
+    try:
+        released = date.fromisoformat(str(release_date)[:10])
+    except ValueError:
+        return True
+    return today - timedelta(days=age) >= released - timedelta(days=365)
+
+
+def rank_trailers(game_title: str, candidates: list[VideoCandidate], max_seconds: int = 600,
+                  release_date: str | None = None, today: date | None = None,
+                  strict_edition: bool = True) -> list[VideoCandidate]:
+    today = today or date.today()
     eligible = []
     for c in candidates:
         if c.live or c.views is None:
@@ -265,8 +331,12 @@ def rank_trailers(game_title: str, candidates: list[VideoCandidate], max_seconds
             continue
         if not title_matches(game_title, c.title):
             continue
+        if strict_edition and not edition_matches(game_title, c.title):
+            continue
         eligible.append(c)
-    return sorted(eligible, key=lambda c: (not bool(OFFICIAL.search(c.title)), -(c.views or 0)))
+    recent = [c for c in eligible if recent_enough(c, release_date, today)]
+    pool = recent or eligible
+    return sorted(pool, key=lambda c: (not bool(OFFICIAL.search(c.title)), -(c.views or 0)))
 
 
 def merge_candidates(lists: list[tuple[str, list[VideoCandidate]]]) -> list[VideoCandidate]:
@@ -281,13 +351,40 @@ def merge_candidates(lists: list[tuple[str, list[VideoCandidate]]]) -> list[Vide
     return list(merged.values())
 
 
-NOISE = re.compile(r"\[(?:music|applause|laughter|музыка|аплодисменты|смех|__)\]|♪+|>>", re.I)
+NOISE = re.compile(r"\[[^\[\]]{1,30}\]|♪+|>>", re.I)
+REPEATS = re.compile(r"(?<!\w)(\w{1,12})[.!?,]*(?:\s+\1[.!?,]*(?!\w)){2,}", re.I)
 
 
 def transcript_to_text(snippets: list[dict]) -> str:
     text = " ".join((s.get("text") or "").replace("\n", " ") for s in snippets)
     text = NOISE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text)
+    text = REPEATS.sub(" ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+TRANSCRIPT_REASONS = {
+    "TranscriptsDisabled": "автор отключил субтитры",
+    "NoTranscriptFound": "субтитров нет",
+    "NoTranscriptAvailable": "субтитров нет",
+    "RequestBlocked": "YouTube не отдаёт субтитры этому серверу",
+    "IpBlocked": "YouTube не отдаёт субтитры этому серверу",
+    "PoTokenRequired": "YouTube требует подтверждение браузера для субтитров",
+    "VideoUnavailable": "ролик недоступен",
+    "VideoUnplayable": "ролик недоступен",
+    "InvalidVideoId": "некорректный id ролика",
+    "AgeRestricted": "у ролика возрастное ограничение",
+    "YouTubeRequestFailed": "YouTube не ответил на запрос субтитров",
+    "FailedToCreateConsentCookie": "YouTube запросил согласие на cookies",
+    "TooManyRequests": "YouTube ограничил частоту запросов",
+}
+
+
+def transcript_reason(exc: BaseException) -> str:
+    for cls in type(exc).__mro__:
+        if cls.__name__ in TRANSCRIPT_REASONS:
+            return TRANSCRIPT_REASONS[cls.__name__]
+    return "не удалось получить субтитры"
 
 
 def sample_transcript(text: str, max_chars: int = 9000) -> str:
@@ -307,7 +404,9 @@ def sample_transcript(text: str, max_chars: int = 9000) -> str:
 
 
 class TranscriptUnavailable(Exception):
-    pass
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 class YouTubeClient:
@@ -315,6 +414,7 @@ class YouTubeClient:
         self.http = http
         self.proxy_url = proxy_url
         self._api = None
+        self.last_stats: dict = {}
 
     def search(self, query: str, sp: str | None = SP_POPULAR_LONG) -> list[VideoCandidate]:
         params = {"search_query": query, "hl": "en", "gl": "US"}
@@ -330,7 +430,7 @@ class YouTubeClient:
                              headers={"Accept": "text/html"})
         return parse_watch_html(resp.text)
 
-    def find_letsplays(self, game_title: str) -> list[VideoCandidate]:
+    def find_letsplays(self, game_title: str, release_date: str | None = None) -> list[VideoCandidate]:
         results = []
         last_exc: Exception | None = None
         for query in (f"{game_title} let's play", f"{game_title} прохождение"):
@@ -338,14 +438,25 @@ class YouTubeClient:
                 results.append((query, self.search(query)))
             except Exception as exc:
                 last_exc = exc
-                log.warning("YouTube search failed for %r: %s", query, exc)
+                log.warning("Поиск YouTube «%s» не удался: %s", query, exc)
         if not results and last_exc is not None:
             raise last_exc
-        return rank_candidates(game_title, merge_candidates(results))
+        stats: dict = {}
+        ranked = rank_candidates(game_title, merge_candidates(results), released=is_released(release_date),
+                                 stats=stats)
+        self.last_stats = stats
+        return ranked
 
-    def find_trailer(self, game_title: str) -> VideoCandidate | None:
-        ranked = rank_trailers(game_title, self.search(f"{game_title} official trailer", sp=None))
-        return ranked[0] if ranked else None
+    def find_trailer(self, game_title: str, release_date: str | None = None) -> VideoCandidate | None:
+        found = self.search(f"{game_title} official trailer", sp=None)
+        ranked = rank_trailers(game_title, found, release_date=release_date)
+        if ranked:
+            return ranked[0]
+        relaxed = rank_trailers(game_title, found, release_date=release_date, strict_edition=False)
+        if relaxed:
+            relaxed[0].base_game = True
+            return relaxed[0]
+        return None
 
     def _transcript_api(self):
         if self._api is None:
@@ -380,7 +491,7 @@ class YouTubeClient:
 
     def transcript(self, video_id: str) -> tuple[str, str]:
         if not VIDEO_ID.match(video_id or ""):
-            raise TranscriptUnavailable("некорректный id ролика")
+            raise TranscriptUnavailable("некорректный id ролика", "InvalidVideoId")
         api = self._transcript_api()
         try:
             listing = api.list(video_id)
@@ -390,10 +501,10 @@ class YouTubeClient:
                 tr = next(iter(listing))
             raw = tr.fetch().to_raw_data()
         except StopIteration:
-            raise TranscriptUnavailable("нет ни одной дорожки субтитров")
+            raise TranscriptUnavailable("субтитров нет", "NoTranscriptFound")
         except Exception as exc:
-            raise TranscriptUnavailable(f"{exc.__class__.__name__}") from exc
+            raise TranscriptUnavailable(transcript_reason(exc), exc.__class__.__name__) from exc
         text = transcript_to_text(raw)
         if len(text) < 200:
-            raise TranscriptUnavailable("расшифровка слишком короткая")
+            raise TranscriptUnavailable("в субтитрах почти нет текста", "TooShort")
         return text, tr.language_code

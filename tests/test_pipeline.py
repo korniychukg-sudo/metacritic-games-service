@@ -21,6 +21,11 @@ from .conftest import (
 )
 
 
+TOP, SECOND, THIRD = "nYThl8ODM8c", "bGBXM6oxbag", "WAKDTrzOaF8"
+DIALOGUE = ("Have you heard of the ancient keyblade war? Of course I have. Long ago, keyblade wielders waged a war "
+            "over the ownership of light. Yeah, the master's favorite story. I wonder what they planned on doing. ") * 8
+
+
 def make(settings, db, mc=None, yt=None, llm=None, clock=None, monitor=None, stt=None):
     return Pipeline(settings, db, monitor or Monitor(), mc or FakeMetacritic(),
                     yt if yt is not None else FakeYouTube(), llm if llm is not None else FakeLLM(),
@@ -35,6 +40,12 @@ def forget_today(db):
 
 class Killed(BaseException):
     pass
+
+
+def iso_now(clock):
+    from app.config import iso
+
+    return iso(clock())
 
 
 def test_first_run_processes_new_releases_and_fills_cards(settings, db):
@@ -54,7 +65,8 @@ def test_first_run_processes_new_releases_and_fills_cards(settings, db):
     assert g["critic_summary"]["method"] == "llm"
     assert g["user_summary"]["method"] == "llm"
     assert g["letsplay"]["status"] == "ok" and g["letsplay"]["method"] == "llm-transcript"
-    assert g["letsplay"]["video"]["video_id"] == "bGBXM6oxbag"
+    assert g["letsplay"]["video"]["video_id"] == TOP and g["letsplay"]["passed_over"] == []
+    assert g["letsplay"]["has_commentary"] is True and g["letsplay"]["evidence"]
     assert len(g["platforms"]) == 3
     assert g["similar"] and all(s["reasons"] for s in g["similar"])
     assert db.get_day_state(day).new_releases_done is False
@@ -139,7 +151,7 @@ def test_interrupted_run_is_recorded_and_resumed(settings, db):
     assert not p.running
     settings.batch_size = 20
     res = p.run()
-    assert res["selected"] == 17
+    assert res["selected"] == 20 and res["sources"] == "new-releases, browse:p1"
     done_first = {it.slug for it in mc.new[:3]}
     later = [slug for kind, slug in mc.calls[5:] if kind == "game"]
     assert not done_first & set(later)
@@ -296,7 +308,7 @@ def test_blocked_youtube_keeps_the_previous_video(settings, db):
     yt.blocked = True
     p.run()
     lp = db.get_game(slug="over-the-hill")["letsplay"]
-    assert lp["video"]["video_id"] == "bGBXM6oxbag" and "капчу" in lp["last_error"]
+    assert lp["video"]["video_id"] == TOP and "капчу" in lp["last_error"] and lp["method"] == "llm-transcript"
     assert any(e["step"] == "youtube:schema" for e in db.recent_errors())
     forget_today(db)
     clock.advance(hours=2)
@@ -455,7 +467,7 @@ def test_backfill_respects_skip_ids_limit_and_deadline(settings, db):
     assert up.backfill_llm(skip, limit=5) == 0
 
 
-def test_whisper_transcribes_the_top_video_when_no_candidate_has_captions(settings, db, tmp_path):
+def test_whisper_transcribes_the_most_popular_video_when_it_has_no_captions(settings, db, tmp_path):
     settings.batch_size = 1
     yt = FakeYouTube(transcript_ok=False)
     source, tr, llm = FakeAudioSource(seconds=60), FakeTranscriber(), FakeLLM()
@@ -464,13 +476,117 @@ def test_whisper_transcribes_the_top_video_when_no_candidate_has_captions(settin
     assert result["status"] == "ok"
     lp = db.get_game(slug="over-the-hill")["letsplay"]
     assert lp["status"] == "ok" and lp["method"] == "llm-whisper" and lp["transcript_method"] == "whisper"
-    assert lp["video"]["video_id"] == "bGBXM6oxbag" and source.calls[0][0] == "bGBXM6oxbag"
+    assert lp["video"]["video_id"] == TOP and [c[0] for c in source.calls] == [TOP]
     assert lp["transcript_chars"] == len(" ".join(WHISPER_TEXT.split())) and lp["transcript_lang"] == "en"
     assert lp["stt"]["model"] == "base" and lp["stt"]["audio_seconds"] == 60 and lp["stt"]["method"] == "whisper"
-    assert lp["transcript_excerpt"] and lp["summary"] and len(lp["checked"]) == settings.youtube_max_candidates
-    assert yt.transcript_calls == settings.youtube_max_candidates
+    assert lp["transcript_excerpt"] and lp["summary"] and lp["checked"][0]["code"] == "TranscriptsDisabled"
+    assert yt.transcript_calls == 1 and lp["passed_over"] == []
     assert any("Whisper" in prompt for prompt in llm.prompts)
     assert tr.released == 1
+
+
+def test_a_less_popular_video_with_captions_does_not_beat_whisper_on_the_top_one(settings, db, tmp_path):
+    settings.batch_size = 1
+
+    class TopHasNoCaptions(FakeYouTube):
+        def transcript(self, video_id):
+            if video_id == TOP:
+                self.transcript_calls += 1
+                from app.youtube import TranscriptUnavailable
+
+                raise TranscriptUnavailable("автор отключил субтитры", "TranscriptsDisabled")
+            return super().transcript(video_id)
+
+    source = FakeAudioSource()
+    make(settings, db, yt=TopHasNoCaptions(), stt=make_stt(settings, source, tmp_root=tmp_path)).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["video"]["video_id"] == TOP and lp["transcript_method"] == "whisper"
+    assert [c[0] for c in source.calls] == [TOP]
+
+
+def test_videos_without_the_authors_commentary_are_skipped(settings, db, tmp_path):
+    settings.batch_size = 1
+    yt = FakeYouTube()
+    yt.transcript_texts[TOP] = DIALOGUE
+    llm = FakeLLM(commentary=lambda prompt: "keyblade" not in prompt)
+    make(settings, db, yt=yt, llm=llm).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "ok" and lp["video"]["video_id"] == SECOND and lp["method"] == "llm-transcript"
+    assert [p["video_id"] for p in lp["passed_over"]] == [TOP]
+    assert "оценок игры от автора" in lp["passed_over"][0]["reason"]
+    assert lp["passed_over"][0]["views"] == 693184
+
+    forget_today(db)
+    yt.transcript_texts = {v: "Heat. Heat. Heat. Heat. Heat. Heat. " * 60 + " ".join(["wind"] * 400)
+                           for v in (TOP, SECOND, THIRD)}
+    other = FakeLLM()
+    p = make(settings, db, yt=yt, llm=other, clock=FakeClock(datetime(2026, 10, 30, 9, 0, tzinfo=timezone.utc)))
+    p.run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["video"]["video_id"] == SECOND and lp["method"] == "llm-transcript"
+    assert "last_error" in lp and "без комментариев автора: 3 ролика" in lp["last_error"]
+    assert not any('"has_commentary"' in prompt for prompt in other.prompts)
+
+
+def test_description_fallback_never_invents_the_authors_opinion(settings, db):
+    settings.batch_size = 1
+    llm = FakeLLM()
+    make(settings, db, yt=FakeYouTube(transcript_ok=False), llm=llm).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "no_transcript" and lp["method"] == "llm-description"
+    assert lp["summary"].startswith("Судя по описанию ролика") and lp["pros"] == [] and lp["cons"] == []
+    assert "Это описание ролика, а не речь его автора" in llm.prompts[-1]
+    assert lp["note"] == "Речь автора ролика не расшифрована (субтитры: автор отключил субтитры (3 ролика))"
+
+
+def test_a_worse_refresh_never_replaces_a_stored_letsplay_or_trailer(settings, db):
+    settings.batch_size = 1
+    clock = FakeClock()
+    yt = FakeYouTube()
+    p = make(settings, db, mc=FakeMetacritic(no_video=True), yt=yt, clock=clock)
+    p.run()
+    first = db.get_game(slug="over-the-hill")
+    assert first["letsplay"]["method"] == "llm-transcript" and first["trailer"]["status"] == "ok"
+    forget_today(db)
+    clock.advance(days=8)
+    yt.transcript_ok = False
+    yt.no_trailer = True
+    p.run()
+    g = db.get_game(slug="over-the-hill")
+    lp = g["letsplay"]
+    assert lp["method"] == "llm-transcript" and lp["transcript_excerpt"] == first["letsplay"]["transcript_excerpt"]
+    assert "Речь автора ролика не расшифрована" in lp["last_error"] and lp["checked_at"] == iso_now(clock)
+    assert g["trailer"]["status"] == "ok" and g["trailer"]["video"]["video_id"] == "TrAiLeR0001"
+    assert g["trailer"]["checked_at"] == iso_now(clock) and "оставлен прежний" in g["trailer"]["last_error"]
+    forget_today(db)
+    clock.advance(days=8)
+    yt.empty = True
+    p.run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["video"]["video_id"] == TOP and lp["method"] == "llm-transcript" and "20 минут" in lp["last_error"]
+
+
+def test_no_video_note_explains_the_strict_title_check(settings, db):
+    settings.batch_size = 1
+
+    class OtherSeries(FakeYouTube):
+        def find_letsplays(self, title, release_date=None):
+            self.searches += 1
+            self.last_stats = {"found": 12, "eligible": 0, "title_mismatch": 7}
+            return []
+
+    yt = OtherSeries()
+    make(settings, db, yt=yt).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "no_video" and "ни в одном названии нет полного названия «over the hill»" in lp["note"]
+    assert lp["search"]["title_mismatch"] == 7
+
+
+def test_release_date_reaches_the_youtube_search(settings, db):
+    settings.batch_size = 1
+    yt = FakeYouTube()
+    make(settings, db, yt=yt).run()
+    assert yt.release_dates == [db.get_game(slug="over-the-hill")["release_date"]] and yt.release_dates[0]
 
 
 def test_captions_can_be_switched_off_to_go_straight_to_whisper(settings, db, tmp_path):
@@ -490,9 +606,11 @@ def test_whisper_failure_falls_back_to_the_video_description(settings, db, tmp_p
     assert result["status"] == "ok" and result["failed"] == 0
     lp = db.get_game(slug="over-the-hill")["letsplay"]
     assert lp["status"] == "no_transcript" and lp["method"] == "llm-description"
-    assert lp["video"]["video_id"] == "bGBXM6oxbag"
-    assert "субтитры: " in lp["note"] and "Whisper: bGBXM6oxbag: yt-dlp не получил данные ролика: Sign in" in lp["note"]
+    assert lp["video"]["video_id"] == TOP
+    assert "субтитры: автор отключил субтитры (3 ролика)" in lp["note"]
+    assert "Whisper: yt-dlp не получил данные ролика: Sign in to confirm (2 ролика)" in lp["note"]
     assert "пропускается до конца запуска" in lp["note"] and len(source.calls) == 2
+    assert [n.get("video_id") for n in lp["stt_checked"]] == [TOP, SECOND, None]
     assert "stt" not in lp
 
 
@@ -515,9 +633,11 @@ def test_whisper_moves_on_when_the_top_video_has_no_speech(settings, db):
     make(settings, db, yt=FakeYouTube(transcript_ok=False), stt=make_stt(settings, source, tr)).run()
     lp = db.get_game(slug="over-the-hill")["letsplay"]
     first, second = [c[0] for c in source.calls]
-    assert lp["method"] == "llm-whisper" and lp["video"]["video_id"] == second != first == "bGBXM6oxbag"
+    assert lp["method"] == "llm-whisper" and (first, second) == (TOP, SECOND) and lp["video"]["video_id"] == SECOND
     reason = "в аудио почти нет речи: детектор речи нашёл 38 с из 900"
     assert lp["stt_checked"] == [{"video_id": first, "reason": reason}]
+    assert lp["passed_over"] == [{"video_id": TOP, "title": lp["candidates"][0]["title"], "views": 693184,
+                                  "reason": "субтитров нет, речь не распознана"}]
 
 
 def test_a_crashing_whisper_never_breaks_the_run(settings, db, tmp_path):
@@ -572,3 +692,23 @@ def test_whisper_letsplays_refresh_weekly_and_get_llm_upgrades(settings, db):
     clock.advance(days=5)
     p.run()
     assert yt.searches == 2 and len(source.calls) == 2
+
+
+def test_an_unverified_old_conclusion_is_replaced_by_an_honest_result(settings, db):
+    from app.pipeline import letsplay_rank
+
+    settings.batch_size = 1
+    clock = FakeClock()
+    p = make(settings, db, yt=FakeYouTube(transcript_ok=False), clock=clock)
+    p.run()
+    gid = db.get_game(slug="over-the-hill")["id"]
+    db.set_json(gid, "letsplay", {"status": "ok", "method": "llm-transcript", "summary": "Автор ценит PS5 Pro",
+                                  "pros": ["выдумано"], "video": {"video_id": "zzzzzzzzzzz"},
+                                  "updated_at": "2000-01-01T00:00:00+00:00", "checked_at": "2000-01-01T00:00:00+00:00"})
+    forget_today(db)
+    p.run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "no_transcript" and lp["video"]["video_id"] == TOP and "last_error" not in lp
+    assert letsplay_rank({"status": "ok", "method": "llm-transcript", "has_commentary": True, "video": {"video_id": "x"}}) == 3
+    assert letsplay_rank({"status": "ok", "method": "extractive-whisper", "video": {"video_id": "x"}}) == 3
+    assert letsplay_rank({"status": "ok", "method": "llm-whisper", "video": {"video_id": "x"}}) == 2
