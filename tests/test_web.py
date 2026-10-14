@@ -7,21 +7,21 @@ from datetime import timedelta
 from fastapi.testclient import TestClient
 
 from app.db import Database
-from app.main import create_app
+from app.main import build_services, create_app
 from app.monitor import Monitor
 from app.pipeline import Pipeline
 
-from .conftest import FakeClock, FakeLLM, FakeMetacritic, FakeYouTube
+from .conftest import FakeClock, FakeLLM, FakeMetacritic, FakeYouTube, make_stt
 
 EVIL_TITLE = '<img src=x onerror="alert(1)">'
 
 
-def client_with_data(settings, run=True, batch=6, clock=None, start_scheduler=False):
+def client_with_data(settings, run=True, batch=6, clock=None, start_scheduler=False, yt=None, stt=None):
     settings.batch_size = batch
     clock = clock or FakeClock()
     mon = Monitor()
     db = Database(settings.db_path)
-    pipeline = Pipeline(settings, db, mon, FakeMetacritic(), FakeYouTube(), FakeLLM(), clock=clock)
+    pipeline = Pipeline(settings, db, mon, FakeMetacritic(), yt or FakeYouTube(), FakeLLM(), clock=clock, stt=stt)
     if run:
         pipeline.run()
     app = create_app(settings, pipeline=pipeline, start_scheduler=start_scheduler, monitor=mon, clock=clock)
@@ -160,7 +160,8 @@ def test_monitor_status_and_live_stream(settings):
         assert r.status_code == 200 and "Запустить обработку сейчас" in r.text
         st = client.get("/api/status").json()
         assert st["totals"]["games_total"] == 6 and st["totals"]["processed_today"] == 6
-        assert {w["name"] for w in st["workers"]} >= {"scheduler", "pipeline", "llm", "metacritic", "youtube"}
+        assert {w["name"] for w in st["workers"]} >= {"scheduler", "pipeline", "llm", "metacritic", "youtube", "stt"}
+        assert "Распознавание речи (Whisper)" in r.text
         assert st["manual"]["allowed"] is True and st["last_run"]["status"] == "ok"
         logging.getLogger("pipeline").info("hello from the live log")
         with client.stream("GET", "/api/events", params={"once": 1}) as resp:
@@ -304,3 +305,33 @@ def test_russian_plurals():
     assert [ru_plural(n, *forms) for n in (1, 2, 5, 11, 12, 21, 22, 25, 101, 111)] == [
         "оценка", "оценки", "оценок", "оценок", "оценок", "оценка", "оценки", "оценок", "оценка", "оценок"]
     assert ru_plural(None, *forms) == "оценок"
+
+
+def test_card_says_when_the_text_comes_from_whisper(settings):
+    stt = make_stt(settings)
+    client, pipeline, _ = client_with_data(settings, batch=1, yt=FakeYouTube(transcript_ok=False), stt=stt)
+    with client:
+        html = client.get("/game/over-the-hill").text
+        assert "LLM по речи, распознанной Whisper" in html
+        assert "Субтитры YouTube недоступны, поэтому речь блогера распознана локально моделью Whisper (base" in html
+        assert "по первым 1 мин аудио" in html and "Фрагменты речи блогера, распознанной Whisper" in html
+        lp = client.get("/api/games/over-the-hill").json()["letsplay"]
+        assert lp["transcript_method"] == "whisper" and lp["stt"]["model"] == "base"
+        lp["stt_checked"] = [{"video_id": "oiVbvxSoNZI", "reason": "в аудио почти нет речи"}, {"reason": "лимит"}]
+        pipeline.db.set_json(pipeline.db.get_game(slug="over-the-hill")["id"], "letsplay", lp)
+        assert "более популярные (1) пропущены, потому что речь в них распознать не удалось" in client.get(
+            "/game/over-the-hill").text
+
+
+def test_monitor_shows_the_speech_worker_state(settings, monkeypatch):
+    mon = Monitor()
+    db = Database(settings.db_path)
+    pipeline = build_services(settings, db, mon)
+    assert pipeline.stt is not None
+    worker = next(w for w in mon.snapshot()["workers"] if w["name"] == "stt")
+    assert worker["status"] == "idle" and "Whisper «base»" in worker["detail"]
+    settings.stt_enabled = False
+    off = Monitor()
+    assert build_services(settings, db, off).stt is None
+    worker = next(w for w in off.snapshot()["workers"] if w["name"] == "stt")
+    assert worker["status"] == "off" and "STT_ENABLED=0" in worker["detail"]

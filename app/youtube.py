@@ -26,7 +26,11 @@ BLOCK_MARKERS = (
 class YouTubeBlocked(SchemaError):
     pass
 
-EXCLUDE = re.compile(r"\b(trailer|review|reviews|teaser|reveal|announcement|preview|обзор|трейлер|news|reaction)\b", re.I)
+EXCLUDE = re.compile(
+    r"\b(trailer|review|reviews|teaser|reveal|announcement|preview|обзор|трейлер|news|reaction)\b"
+    r"|\b(no|without)\s+(commentary|talking)\b|\bnocommentary\b|без\s+(комментариев|комментария|слов)",
+    re.I,
+)
 PREFER = re.compile(
     r"(let'?s\s*play|walkthrough|playthrough|gameplay|full\s+game|part\s*1|episode\s*1|прохождение|летсплей|стрим|stream)",
     re.I,

@@ -63,3 +63,31 @@ def test_numeric_settings_are_clamped(monkeypatch, caplog):
 def test_parse_iso_handles_naive_and_bad_values():
     assert config.parse_iso("2026-10-14T10:00:00").tzinfo == timezone.utc
     assert config.parse_iso("nope") is None and config.parse_iso(None) is None
+
+
+def test_speech_recognition_settings(monkeypatch, tmp_path):
+    for name in ("STT_ENABLED", "STT_MODEL", "STT_MAX_MINUTES", "STT_MAX_PER_RUN", "STT_TIMEOUT_SECONDS",
+                 "STT_THREADS", "STT_MODEL_DIR", "YOUTUBE_CAPTIONS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "db" / "games.db"))
+    s = Settings()
+    assert s.stt_enabled and s.youtube_captions and s.stt_model == "base"
+    assert (s.stt_max_minutes, s.stt_max_per_run, s.stt_timeout_seconds) == (15, 6, 300)
+    assert s.stt_model_dir == str(tmp_path / "db" / "models")
+    assert 1 <= s.stt_cpu_threads <= 4
+
+    monkeypatch.setenv("STT_ENABLED", "0")
+    monkeypatch.setenv("STT_MODEL", "small")
+    monkeypatch.setenv("STT_MAX_MINUTES", "500")
+    monkeypatch.setenv("STT_MAX_PER_RUN", "0")
+    monkeypatch.setenv("STT_THREADS", "2")
+    monkeypatch.setenv("STT_MODEL_DIR", "/models")
+    monkeypatch.setenv("YOUTUBE_CAPTIONS", "off")
+    s = Settings()
+    assert not s.stt_enabled and not s.youtube_captions and s.stt_model == "small"
+    assert s.stt_max_minutes == 60 and s.stt_max_per_run == 1 and s.stt_cpu_threads == 2
+    assert s.stt_model_dir == "/models"
+    monkeypatch.setenv("STT_MAX_MINUTES", "0")
+    monkeypatch.setenv("STT_MODEL", "  ")
+    s = Settings()
+    assert s.stt_max_minutes == 1 and s.stt_model == "base"

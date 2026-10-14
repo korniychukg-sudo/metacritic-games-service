@@ -122,9 +122,10 @@
         {% if lp.cons %}<h3>Не понравилось</h3><ul class="points dislikes">{% for x in lp.cons %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
         {% if not lp.summary and not lp.pros and not lp.cons %}<p class="muted">{{ lp.note or 'Заключение построить не удалось.' }} Ссылка на ролик сохранена.</p>{% endif %}
         <div class="method">
-          {% if lp.status == 'ok' %}Основано на расшифровке речи блогера ({{ lp.transcript_chars|num }} символов, язык: {{ lp.transcript_lang }}).
+          {% if lp.status == 'ok' and lp.transcript_method == 'whisper' %}{% set st = lp.stt or {} %}{% if lp.checked %}Субтитры YouTube недоступны{% else %}Субтитры YouTube отключены настройкой{% endif %}, поэтому речь блогера распознана локально моделью Whisper ({{ st.model or 'base' }}, faster-whisper на CPU) по первым {{ ((st.audio_seconds or 0) / 60)|round|int }} мин аудио ролика: {{ lp.transcript_chars|num }} символов, язык: {{ lp.transcript_lang }}, распознавание заняло {{ (st.transcribe_seconds or 0)|round|int }} с.
+          {% elif lp.status == 'ok' %}Основано на расшифровке речи блогера из субтитров YouTube ({{ lp.transcript_chars|num }} символов, язык: {{ lp.transcript_lang }}).
           {% elif lp.note %}{{ lp.note }}.{% endif %}
-          Самый популярный подходящий ролик выбран из поиска YouTube по просмотрам. Обновлено {{ lp.updated_at|dt }}.
+          {% set skipped = (lp.stt_checked or [])|selectattr('video_id', 'defined')|list %}{% if lp.transcript_method == 'whisper' and skipped %}Ролик выбран из поиска YouTube по просмотрам: это самый популярный подходящий ролик с речью блогера, более популярные ({{ skipped|length }}) пропущены, потому что речь в них распознать не удалось (нет комментариев или аудио недоступно).{% else %}Самый популярный подходящий ролик выбран из поиска YouTube по просмотрам.{% endif %} Обновлено {{ lp.updated_at|dt }}.
           {% if lp.last_error %}<br><span class="badge err">последняя проверка: {{ lp.last_error }}</span>{% endif %}
           {% if lp.error %}<br><span class="badge err">LLM: {{ lp.error }}</span>{% endif %}
         </div>
@@ -132,7 +133,7 @@
     </div>
     {% if lp.transcript_excerpt %}
     <details>
-      <summary>Фрагменты расшифровки речи блогера (начало, середина, конец)</summary>
+      <summary>{% if lp.transcript_method == 'whisper' %}Фрагменты речи блогера, распознанной Whisper{% else %}Фрагменты расшифровки речи блогера{% endif %} (начало, середина, конец)</summary>
       <p class="small desc excerpt">{{ lp.transcript_excerpt }}</p>
     </details>
     {% endif %}

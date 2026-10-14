@@ -421,7 +421,7 @@ class Database:
                 "backfill_at, backfill_attempts FROM games "
                 "WHERE json_extract(critic_summary, '$.method') = 'extractive' "
                 "OR json_extract(user_summary, '$.method') = 'extractive' "
-                "OR (json_extract(letsplay, '$.method') = 'extractive-transcript' "
+                "OR (json_extract(letsplay, '$.method') IN ('extractive-transcript', 'extractive-whisper') "
                 "    AND json_extract(letsplay, '$.transcript_excerpt') IS NOT NULL) "
                 "OR (json_extract(letsplay, '$.method') = 'description' "
                 "    AND json_extract(letsplay, '$.video.description') IS NOT NULL) "

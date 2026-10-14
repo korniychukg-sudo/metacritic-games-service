@@ -11,6 +11,7 @@ WORKER_TITLES = {
     "metacritic": "Metacritic",
     "youtube": "YouTube",
     "llm": "LLM",
+    "stt": "Распознавание речи (Whisper)",
 }
 
 

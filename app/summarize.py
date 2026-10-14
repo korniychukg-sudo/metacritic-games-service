@@ -273,10 +273,13 @@ def build_letsplay_prompt(game_title: str, video_title: str, channel: str | None
     if source == "transcript":
         head = (f"Игра «{game_title}». Ролик «{video_title}»{by}. "
                 "Ключевые фрагменты автоматической расшифровки речи блогера:\n")
+    elif source == "whisper":
+        head = (f"Игра «{game_title}». Ролик «{video_title}»{by}. Ключевые фрагменты речи блогера из начала "
+                "ролика, распознанной моделью Whisper (возможны ошибки распознавания в именах и терминах):\n")
     else:
         head = f"Игра «{game_title}». Ролик «{video_title}»{by}. Расшифровки нет, есть только описание ролика:\n"
     available = max(300, max_chars - len(LETSPLAY_SYSTEM) - len(head) - len(LETSPLAY_TASK))
-    body = condense_transcript(text, available) if source == "transcript" else _clip(text, available)
+    body = condense_transcript(text, available) if source in ("transcript", "whisper") else _clip(text, available)
     return [{"role": "system", "content": LETSPLAY_SYSTEM}, {"role": "user", "content": head + body + LETSPLAY_TASK}]
 
 

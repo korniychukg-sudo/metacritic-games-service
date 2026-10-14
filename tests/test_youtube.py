@@ -46,6 +46,19 @@ def test_rank_filters_short_live_and_trailers():
     assert [c.video_id for c in ranked] == ["d", "e"]
 
 
+def test_videos_without_commentary_are_not_lets_plays():
+    base = dict(views=10, length_seconds=3600, channel="c")
+    cands = [
+        VideoCandidate("a", "Game X Walkthrough FULL GAME (4K 60FPS) No Commentary", **{**base, "views": 900}),
+        VideoCandidate("b", "Game X прохождение без комментариев", **{**base, "views": 800}),
+        VideoCandidate("c", "Game X gameplay #nocommentary", **{**base, "views": 700}),
+        VideoCandidate("d", "Game X let's play part 1", **base),
+    ]
+    assert [c.video_id for c in rank_candidates("Game X", cands)] == ["d"]
+    ru = parse_search_html(load_text("yt_search_star-wars-galactic-racer_prohozhdenie_over20min.html"))
+    assert not any("commentary" in c.title.lower() for c in rank_candidates("Star Wars: Galactic Racer", ru))
+
+
 def test_watch_page_details():
     d = parse_watch_html(load_text("yt_watch_bGBXM6oxbag.html"))
     assert d["title"].startswith("STAR WARS: GALACTIC RACER Walkthrough")

@@ -1,6 +1,8 @@
 import copy
 import json
+import os
 import sys
+import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from app.config import Settings  # noqa: E402
 from app.db import Database  # noqa: E402
 from app.llm import LLMError, LLMSkipped  # noqa: E402
 from app.metacritic import ListItem, parse_composer, parse_list  # noqa: E402
+from app.stt import AudioFile, SpeechToText, Transcript  # noqa: E402
 from app.youtube import (  # noqa: E402
     TranscriptUnavailable,
     VideoCandidate,
@@ -151,6 +154,7 @@ class FakeYouTube:
         self.blocked = blocked
         self.searches = 0
         self.trailer_searches = 0
+        self.transcript_calls = 0
 
     def find_letsplays(self, title):
         self.searches += 1
@@ -167,6 +171,7 @@ class FakeYouTube:
                               channel="Publisher")
 
     def transcript(self, video_id):
+        self.transcript_calls += 1
         if not self.transcript_ok:
             raise TranscriptUnavailable("TranscriptsDisabled")
         return self.text, "en"
@@ -186,6 +191,7 @@ class FakeLLM:
         self.circuit_open = False
         self.failures = 0
         self.runs = 0
+        self.prompts = []
 
     @property
     def available(self):
@@ -214,12 +220,75 @@ class FakeLLM:
         if self.fail:
             raise LLMError("HTTP 503")
         prompt = messages[-1]["content"]
+        self.prompts.append(prompt)
         if '"summary"' in prompt:
             value = {"summary": "Автор ролика проходит первые гонки.", "pros": ["скорость"], "cons": ["сложность"],
                      "verdict": "Блогеру понравилось."}
         else:
             value = {"likes": ["красивые трассы"], "dislikes": ["нет сплит-скрина"], "verdict": "В целом хвалят."}
         return validator(value) if validator else value
+
+
+WHISPER_TEXT = (
+    "Alright, we are finally playing this racer. I really love the speed and the tracks look beautiful. "
+    "Honestly the controls feel a bit clunky at first and the bugs are annoying. "
+) * 6
+
+
+def write_wav(path, seconds: float, rate: int = 8000, channels: int = 2, freq: float = 440.0) -> str:
+    import numpy as np
+
+    t = np.arange(int(seconds * rate)) / rate
+    tone = (0.3 * np.sin(2 * np.pi * freq * t) * 32767).astype("<i2")
+    frames = np.repeat(tone[:, None], channels, axis=1).tobytes()
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(frames)
+    return str(path)
+
+
+class FakeAudioSource:
+    def __init__(self, seconds: float = 40.0, error: Exception | None = None):
+        self.seconds = seconds
+        self.error = error
+        self.calls = []
+
+    def fetch(self, video_id, dest_dir, max_seconds):
+        self.calls.append((video_id, max_seconds, dest_dir))
+        if self.error:
+            raise self.error
+        path = write_wav(os.path.join(dest_dir, f"{video_id}.wav"), self.seconds)
+        return AudioFile(path=path, format_id="249", ext="wav", codec="pcm", abr=48.0, bytes=os.path.getsize(path),
+                         duration=3600, complete=True)
+
+
+class FakeTranscriber:
+    def __init__(self, text: str = WHISPER_TEXT, error: BaseException | None = None):
+        self.text = text
+        self.error = error
+        self.calls = []
+        self.released = 0
+        self.loaded = False
+        self.load_seconds = 0.4
+
+    def transcribe(self, audio, budget):
+        self.calls.append((len(audio), budget))
+        if self.error:
+            raise self.error
+        self.loaded = True
+        return Transcript(text=self.text, language="en", speech_seconds=round(len(audio) / 16000 * 0.6, 1),
+                          seconds=1.5, complete=True)
+
+    def release(self):
+        self.released += 1
+        self.loaded = False
+
+
+def make_stt(settings, source=None, transcriber=None, tmp_root=None, on_state=None):
+    return SpeechToText(settings, source=source or FakeAudioSource(), transcriber=transcriber or FakeTranscriber(),
+                        tmp_root=str(tmp_root) if tmp_root else None, on_state=on_state)
 
 
 @pytest.fixture

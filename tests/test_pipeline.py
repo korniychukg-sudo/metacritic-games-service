@@ -7,13 +7,24 @@ from app.llm import LLMClient, LLMError
 from app.monitor import Monitor
 from app.pipeline import AlreadyRunning, Pipeline
 
-from .conftest import FakeClock, FakeLLM, FakeMetacritic, FakeYouTube
+from app.stt import NoSpeech, SpeechUnavailable
+
+from .conftest import (
+    WHISPER_TEXT,
+    FakeAudioSource,
+    FakeClock,
+    FakeLLM,
+    FakeMetacritic,
+    FakeTranscriber,
+    FakeYouTube,
+    make_stt,
+)
 
 
-def make(settings, db, mc=None, yt=None, llm=None, clock=None, monitor=None):
+def make(settings, db, mc=None, yt=None, llm=None, clock=None, monitor=None, stt=None):
     return Pipeline(settings, db, monitor or Monitor(), mc or FakeMetacritic(),
                     yt if yt is not None else FakeYouTube(), llm if llm is not None else FakeLLM(),
-                    clock=clock or FakeClock())
+                    clock=clock or FakeClock(), stt=stt)
 
 
 def forget_today(db):
@@ -442,3 +453,122 @@ def test_backfill_respects_skip_ids_limit_and_deadline(settings, db):
     assert up.backfill_llm(set(), limit=2) == 2
     skip = {db.get_game(slug=s)["id"] for s in [it.slug for it in FakeMetacritic().new[:3]]}
     assert up.backfill_llm(skip, limit=5) == 0
+
+
+def test_whisper_transcribes_the_top_video_when_no_candidate_has_captions(settings, db, tmp_path):
+    settings.batch_size = 1
+    yt = FakeYouTube(transcript_ok=False)
+    source, tr, llm = FakeAudioSource(seconds=60), FakeTranscriber(), FakeLLM()
+    stt = make_stt(settings, source, tr, tmp_path)
+    result = make(settings, db, yt=yt, llm=llm, stt=stt).run()
+    assert result["status"] == "ok"
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "ok" and lp["method"] == "llm-whisper" and lp["transcript_method"] == "whisper"
+    assert lp["video"]["video_id"] == "bGBXM6oxbag" and source.calls[0][0] == "bGBXM6oxbag"
+    assert lp["transcript_chars"] == len(" ".join(WHISPER_TEXT.split())) and lp["transcript_lang"] == "en"
+    assert lp["stt"]["model"] == "base" and lp["stt"]["audio_seconds"] == 60 and lp["stt"]["method"] == "whisper"
+    assert lp["transcript_excerpt"] and lp["summary"] and len(lp["checked"]) == settings.youtube_max_candidates
+    assert yt.transcript_calls == settings.youtube_max_candidates
+    assert any("Whisper" in prompt for prompt in llm.prompts)
+    assert tr.released == 1
+
+
+def test_captions_can_be_switched_off_to_go_straight_to_whisper(settings, db, tmp_path):
+    settings.batch_size = 1
+    settings.youtube_captions = False
+    yt = FakeYouTube()
+    make(settings, db, yt=yt, stt=make_stt(settings, tmp_root=tmp_path)).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert yt.transcript_calls == 0 and lp["transcript_method"] == "whisper" and lp["checked"] == []
+
+
+def test_whisper_failure_falls_back_to_the_video_description(settings, db, tmp_path):
+    settings.batch_size = 1
+    source = FakeAudioSource(error=SpeechUnavailable("yt-dlp не получил данные ролика: Sign in to confirm"))
+    result = make(settings, db, yt=FakeYouTube(transcript_ok=False),
+                  stt=make_stt(settings, source, tmp_root=tmp_path)).run()
+    assert result["status"] == "ok" and result["failed"] == 0
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "no_transcript" and lp["method"] == "llm-description"
+    assert lp["video"]["video_id"] == "bGBXM6oxbag"
+    assert "субтитры: " in lp["note"] and "Whisper: bGBXM6oxbag: yt-dlp не получил данные ролика: Sign in" in lp["note"]
+    assert "пропускается до конца запуска" in lp["note"] and len(source.calls) == 2
+    assert "stt" not in lp
+
+
+class ScriptedTranscriber(FakeTranscriber):
+    def __init__(self, errors):
+        super().__init__()
+        self.errors = list(errors)
+
+    def transcribe(self, audio, budget):
+        if self.errors:
+            self.calls.append((len(audio), budget))
+            raise self.errors.pop(0)
+        return super().transcribe(audio, budget)
+
+
+def test_whisper_moves_on_when_the_top_video_has_no_speech(settings, db):
+    settings.batch_size = 1
+    source = FakeAudioSource()
+    tr = ScriptedTranscriber([NoSpeech("в аудио почти нет речи: детектор речи нашёл 38 с из 900")])
+    make(settings, db, yt=FakeYouTube(transcript_ok=False), stt=make_stt(settings, source, tr)).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    first, second = [c[0] for c in source.calls]
+    assert lp["method"] == "llm-whisper" and lp["video"]["video_id"] == second != first == "bGBXM6oxbag"
+    reason = "в аудио почти нет речи: детектор речи нашёл 38 с из 900"
+    assert lp["stt_checked"] == [{"video_id": first, "reason": reason}]
+
+
+def test_a_crashing_whisper_never_breaks_the_run(settings, db, tmp_path):
+    settings.batch_size = 2
+    tr = FakeTranscriber(error=MemoryError("out of memory"))
+    result = make(settings, db, yt=FakeYouTube(transcript_ok=False), stt=make_stt(settings, transcriber=tr)).run()
+    assert result["status"] == "ok" and result["ok"] == 2
+    for item in FakeMetacritic().new[:2]:
+        assert db.get_game(slug=item.slug)["letsplay"]["method"] == "llm-description"
+    assert len(tr.calls) == 2
+
+
+def test_whisper_is_capped_per_run_and_skipped_near_the_time_limit(settings, db):
+    settings.batch_size = 3
+    settings.stt_max_per_run = 1
+    source = FakeAudioSource()
+    make(settings, db, yt=FakeYouTube(transcript_ok=False), stt=make_stt(settings, source)).run()
+    methods = [db.get_game(slug=i.slug)["letsplay"] for i in FakeMetacritic().new[:3]]
+    assert [lp["method"] for lp in methods] == ["llm-whisper", "llm-description", "llm-description"]
+    assert "лимит" in methods[1]["note"] and len(source.calls) == 1
+
+    forget_today(db)
+    settings.run_max_minutes = 5
+    settings.stt_max_per_run = 5
+    clock = FakeClock()
+    clock.advance(days=2)
+    late = FakeAudioSource()
+    make(settings, db, yt=FakeYouTube(transcript_ok=False), stt=make_stt(settings, late), clock=clock).run()
+    assert late.calls == []
+    assert "отложено" in db.get_game(slug=FakeMetacritic().new[1].slug)["letsplay"]["note"]
+
+
+def test_whisper_letsplays_refresh_weekly_and_get_llm_upgrades(settings, db):
+    settings.batch_size = 1
+    settings.llm_backfill_limit = 0
+    clock = FakeClock()
+    yt = FakeYouTube(transcript_ok=False)
+    source = FakeAudioSource()
+    make(settings, db, yt=yt, llm=FakeLLM(fail=True), clock=clock, stt=make_stt(settings, source)).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["method"] == "extractive-whisper" and lp["transcript_excerpt"]
+    up = make(settings, db, llm=FakeLLM(), clock=clock)
+    assert up.backfill_llm(set(), limit=10) >= 1
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["method"] == "llm-whisper" and lp["transcript_method"] == "whisper"
+    p = make(settings, db, yt=yt, clock=clock, stt=make_stt(settings, source))
+    forget_today(db)
+    clock.advance(days=3)
+    p.run()
+    assert yt.searches == 1
+    forget_today(db)
+    clock.advance(days=5)
+    p.run()
+    assert yt.searches == 2 and len(source.calls) == 2

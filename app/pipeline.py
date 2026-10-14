@@ -13,6 +13,7 @@ from .metacritic import GameDetails, ListItem, MetacriticClient, PlatformInfo, R
 from .monitor import Monitor
 from .selection import select_batch
 from .similarity import GameFeatures, compute_similar
+from .stt import SpeechResult, SpeechToText, SpeechUnavailable
 from .summarize import (
     build_letsplay_prompt,
     extractive_transcript_summary,
@@ -25,7 +26,8 @@ from .youtube import TranscriptUnavailable, VideoCandidate, YouTubeClient, sampl
 log = logging.getLogger("pipeline")
 
 LEASE = "pipeline"
-FULL_LETSPLAY = {"llm-transcript", "extractive-transcript"}
+FULL_LETSPLAY = {"llm-transcript", "extractive-transcript", "llm-whisper", "extractive-whisper"}
+TRANSCRIPT_EXTRACTIVE = {"extractive-transcript": "transcript", "extractive-whisper": "whisper"}
 SCALAR_KEEP = ("description", "cover_url", "hero_url", "video_embed_url", "video_manifest_url", "video_title",
                "release_date", "lead_platform", "rating")
 LIST_KEEP = ("developers", "publishers", "genres", "franchises")
@@ -97,14 +99,17 @@ class _Heartbeat:
 
 class Pipeline:
     def __init__(self, settings: Settings, db: Database, monitor: Monitor, metacritic: MetacriticClient,
-                 youtube: YouTubeClient | None, llm: LLMClient | None, clock=utcnow):
+                 youtube: YouTubeClient | None, llm: LLMClient | None, clock=utcnow,
+                 stt: SpeechToText | None = None):
         self.settings = settings
         self.db = db
         self.monitor = monitor
         self.mc = metacritic
         self.yt = youtube
         self.llm = llm
+        self.stt = stt
         self.clock = clock
+        self._deadline: datetime | None = None
         self.owner = make_owner_id()
         self._lock = threading.Lock()
 
@@ -185,6 +190,8 @@ class Pipeline:
             self.llm.begin_run()
             if was_skipped:
                 self.monitor.set_worker("llm", "idle", "новый запуск: LLM снова вызывается")
+        if self.stt is not None:
+            self.stt.begin_run()
         heartbeat = _Heartbeat(self, run_id)
         heartbeat.start()
         self.monitor.set_progress(run_id=run_id, done=0, total=0, ok=0, failed=0, current=None,
@@ -200,6 +207,9 @@ class Pipeline:
             self._error(run_id, day, None, "run", message)
         finally:
             heartbeat.stop()
+            self._deadline = None
+            if self.stt is not None:
+                self.stt.end_run()
             result["seconds"] = round((self.clock() - started).total_seconds())
             try:
                 self.db.finish_run(run_id, result["status"], result["selected"], result["ok"], result["failed"],
@@ -215,6 +225,7 @@ class Pipeline:
     def _run_body(self, run_id: int, day: str, batch: int, started: datetime, result: dict) -> str:
         s = self.settings
         deadline = started + timedelta(minutes=s.run_max_minutes)
+        self._deadline = deadline
         try:
             pruned = self.db.prune(started, s.errors_keep_days, s.processed_keep_days)
             if any(pruned.values()):
@@ -420,28 +431,55 @@ class Pipeline:
             return {"status": "no_video", "method": "none", "candidates": [], "updated_at": now, "checked_at": now,
                     "note": "На YouTube не нашлось подходящих летсплеев длиннее 10 минут"}
         checked = []
+        if self.settings.youtube_captions:
+            for cand in candidates[: self.settings.youtube_max_candidates]:
+                self._step("YouTube: расшифровка", f"{title} / {cand.video_id}")
+                try:
+                    text, lang = self.yt.transcript(cand.video_id)
+                except TranscriptUnavailable as exc:
+                    checked.append({"video_id": cand.video_id, "reason": str(exc)})
+                    log.info("No transcript for %s (%s): %s", cand.video_id, title, exc)
+                    continue
+                self._refine(cand)
+                self._step("LLM: заключение по летсплею", title)
+                result, method, error = self._conclude(title, cand, text, "transcript")
+                if result is None:
+                    result, method = extractive_transcript_summary(text), "extractive-transcript"
+                return {"status": "ok", "method": method, "video": cand.to_dict(), "transcript_method": "captions",
+                        "transcript_chars": len(text), "transcript_lang": lang,
+                        "transcript_excerpt": sample_transcript(text, 6000), "checked": checked, "candidates": top,
+                        "updated_at": now, "checked_at": now, "error": error, **result}
+
+        stt_notes = []
         for cand in candidates[: self.settings.youtube_max_candidates]:
-            self._step("YouTube: расшифровка", f"{title} / {cand.video_id}")
-            try:
-                text, lang = self.yt.transcript(cand.video_id)
-            except TranscriptUnavailable as exc:
-                checked.append({"video_id": cand.video_id, "reason": str(exc)})
-                log.info("No transcript for %s (%s): %s", cand.video_id, title, exc)
-                continue
-            self._refine(cand)
-            self._step("LLM: заключение по летсплею", title)
-            result, method, error = self._conclude(title, cand, text, "transcript")
-            if result is None:
-                result, method = extractive_transcript_summary(text), "extractive-transcript"
-            return {"status": "ok", "method": method, "video": cand.to_dict(), "transcript_chars": len(text),
-                    "transcript_lang": lang, "transcript_excerpt": sample_transcript(text, 6000),
-                    "checked": checked, "candidates": top, "updated_at": now, "checked_at": now, "error": error,
-                    **result}
+            speech, reason, attempted = self._speech(title, cand)
+            if speech is not None:
+                self._refine(cand)
+                self._step("LLM: заключение по летсплею", title)
+                result, method, error = self._conclude(title, cand, speech.text, "whisper")
+                if result is None:
+                    result, method = extractive_transcript_summary(speech.text), "extractive-whisper"
+                return {"status": "ok", "method": method, "video": cand.to_dict(), "transcript_method": "whisper",
+                        "transcript_chars": len(speech.text), "transcript_lang": speech.language,
+                        "transcript_excerpt": sample_transcript(speech.text, 6000), "stt": speech.meta(),
+                        "checked": checked, "stt_checked": stt_notes, "candidates": top, "updated_at": now,
+                        "checked_at": now, "error": error, **result}
+            if reason:
+                stt_notes.append({"video_id": cand.video_id, "reason": reason} if attempted else {"reason": reason})
+            if not attempted:
+                break
 
         best = candidates[0]
         self._refine(best)
-        reasons = "; ".join(f"{c['video_id']}: {c['reason']}" for c in checked)
-        note = f"Расшифровка недоступна ({reasons})" if reasons else "Расшифровка недоступна"
+        stt_note = "; ".join(f"{n['video_id']}: {n['reason']}" if "video_id" in n else n["reason"] for n in stt_notes)
+        parts = []
+        if checked:
+            parts.append("субтитры: " + "; ".join(f"{c['video_id']}: {c['reason']}" for c in checked))
+        elif not self.settings.youtube_captions:
+            parts.append("субтитры YouTube не запрашивались (YOUTUBE_CAPTIONS=0)")
+        if stt_note:
+            parts.append(f"Whisper: {stt_note}")
+        note = f"Расшифровка недоступна ({'; '.join(parts)})" if parts else "Расшифровка недоступна"
         if best.description:
             text = f"Название: {best.title}\nОписание: {best.description[:3000]}"
             result, method, error = self._conclude(title, best, text, "description")
@@ -453,6 +491,26 @@ class Pipeline:
                     **result}
         return {"status": "no_transcript", "method": "none", "video": best.to_dict(), "checked": checked,
                 "candidates": top, "updated_at": now, "checked_at": now, "note": note}
+
+    def _speech(self, title: str, cand: VideoCandidate) -> tuple[SpeechResult | None, str | None, bool]:
+        if self.stt is None:
+            return None, None, False
+        reason = self.stt.unavailable_reason()
+        if reason:
+            return None, reason, False
+        if self._deadline is not None:
+            left = (self._deadline - self.clock()).total_seconds()
+            if left < self.settings.stt_timeout_seconds + 60:
+                return None, f"до конца запуска {max(0, int(left // 60))} мин, распознавание отложено", False
+        self._step("Whisper: распознавание речи", f"{title} / {cand.video_id}")
+        try:
+            return self.stt.transcribe_video(cand.video_id), None, True
+        except SpeechUnavailable as exc:
+            log.warning("Whisper for %s (%s) gave no text: %s", title, cand.video_id, exc)
+            return None, str(exc)[:200], True
+        except Exception as exc:
+            log.exception("Whisper for %s (%s) crashed", title, cand.video_id)
+            return None, exc.__class__.__name__, True
 
     def _refine(self, cand) -> None:
         try:
@@ -512,8 +570,9 @@ class Pipeline:
                 continue
             v = lp["video"]
             cand = VideoCandidate(video_id=v["video_id"], title=v.get("title") or "", channel=v.get("channel"))
-            if lp.get("method") == "extractive-transcript" and lp.get("transcript_excerpt"):
-                result, method, _ = self._conclude(g["title"], cand, lp["transcript_excerpt"], "transcript")
+            if lp.get("method") in TRANSCRIPT_EXTRACTIVE and lp.get("transcript_excerpt"):
+                source = TRANSCRIPT_EXTRACTIVE[lp["method"]]
+                result, method, _ = self._conclude(g["title"], cand, lp["transcript_excerpt"], source)
             elif lp.get("method") == "description" and v.get("description"):
                 text = f"Название: {cand.title}\nОписание: {v['description'][:3000]}"
                 result, method, _ = self._conclude(g["title"], cand, text, "description")

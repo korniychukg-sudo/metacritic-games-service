@@ -108,9 +108,34 @@ class Settings:
     letsplay_retry_hours: int = field(default_factory=lambda: _int("LETSPLAY_RETRY_HOURS", 24, 1))
     trailer_fallback: bool = field(default_factory=lambda: _bool("YOUTUBE_TRAILER_FALLBACK", True))
     trailer_refresh_days: int = field(default_factory=lambda: _int("TRAILER_REFRESH_DAYS", 7, 1))
+    youtube_captions: bool = field(default_factory=lambda: _bool("YOUTUBE_CAPTIONS", True))
+
+    stt_enabled: bool = field(default_factory=lambda: _bool("STT_ENABLED", True))
+    stt_model: str = field(default_factory=lambda: os.environ.get("STT_MODEL", "").strip() or "base")
+    stt_max_minutes: int = field(default_factory=lambda: _int("STT_MAX_MINUTES", 15, 1, 60))
+    stt_max_per_run: int = field(default_factory=lambda: _int("STT_MAX_PER_RUN", 6, 1, 50))
+    stt_timeout_seconds: int = field(default_factory=lambda: _int("STT_TIMEOUT_SECONDS", 300, 30, 3600))
+    stt_threads: int = field(default_factory=lambda: _int("STT_THREADS", 0, 0, 32))
+    stt_model_dir_raw: str = field(default_factory=lambda: os.environ.get("STT_MODEL_DIR", "").strip())
 
     similar_top_n: int = field(default_factory=lambda: _int("SIMILAR_TOP_N", 5, 1, 20))
     log_level: str = field(default_factory=lambda: os.environ.get("LOG_LEVEL", "INFO"))
+
+    @property
+    def stt_model_dir(self) -> str:
+        if self.stt_model_dir_raw:
+            return self.stt_model_dir_raw
+        return os.path.join(os.path.dirname(os.path.abspath(self.db_path)), "models")
+
+    @property
+    def stt_cpu_threads(self) -> int:
+        if self.stt_threads:
+            return self.stt_threads
+        try:
+            cpus = len(os.sched_getaffinity(0))
+        except AttributeError:
+            cpus = os.cpu_count() or 1
+        return max(1, min(4, cpus))
 
     @property
     def day_tz(self) -> tzinfo:

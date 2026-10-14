@@ -25,6 +25,7 @@ from .metacritic import MetacriticClient, safe_url
 from .monitor import Monitor, MonitorLogHandler, monitor as default_monitor
 from .pipeline import Pipeline
 from .scheduler import Scheduler
+from .stt import SpeechToText
 from .youtube import VIDEO_ID, YouTubeClient
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +50,8 @@ METHOD_LABELS = {
     "none": "нет данных",
     "llm-transcript": "LLM по расшифровке речи",
     "extractive-transcript": "фразы из расшифровки без LLM",
+    "llm-whisper": "LLM по речи, распознанной Whisper",
+    "extractive-whisper": "фразы из речи, распознанной Whisper, без LLM",
     "llm-description": "LLM по описанию ролика",
     "description": "описание ролика",
 }
@@ -107,7 +110,7 @@ def setup_logging(level: str, monitor: Monitor) -> None:
         sh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         root.addHandler(sh)
     root.setLevel(level.upper())
-    for noisy in ("httpx", "httpcore", "urllib3"):
+    for noisy in ("httpx", "httpcore", "urllib3", "faster_whisper", "huggingface_hub"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
@@ -120,11 +123,20 @@ def build_services(s: Settings, db: Database, monitor: Monitor) -> Pipeline:
                     on_state=lambda status, detail: monitor.set_worker("llm", status, detail),
                     reasoning_effort=s.llm_reasoning_effort)
     yt = YouTubeClient(http, s.youtube_proxy_url) if s.youtube_enabled else None
+    stt = None
     if not s.youtube_enabled:
         monitor.set_worker("youtube", "off", "поиск летсплеев выключен (YOUTUBE_ENABLED=0)")
+        monitor.set_worker("stt", "off", "выключено вместе с YouTube (YOUTUBE_ENABLED=0)")
+    elif not s.stt_enabled:
+        monitor.set_worker("stt", "off", "распознавание речи выключено (STT_ENABLED=0), остаются субтитры YouTube")
+    else:
+        stt = SpeechToText(s, http.limiter, on_state=lambda status, detail: monitor.set_worker("stt", status, detail))
+        when = ("субтитры отключены (YOUTUBE_CAPTIONS=0), речь всегда распознаётся локально" if not s.youtube_captions
+                else "включается, если у роликов нет субтитров")
+        monitor.set_worker("stt", "idle", f"{stt.describe()}; {when}")
     if not s.llm_enabled:
         monitor.set_worker("llm", "off", "LLM выключена, резюме строятся без неё")
-    return Pipeline(s, db, monitor, MetacriticClient(http), yt, llm)
+    return Pipeline(s, db, monitor, MetacriticClient(http), yt, llm, stt=stt)
 
 
 def fmt_date(value: str | None) -> str:
