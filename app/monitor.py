@@ -1,7 +1,7 @@
 import logging
 import threading
-import time
 from collections import deque
+from datetime import datetime, timezone, tzinfo
 
 from .config import iso, utcnow
 
@@ -15,7 +15,8 @@ WORKER_TITLES = {
 
 
 class Monitor:
-    def __init__(self, log_size: int = 400):
+    def __init__(self, log_size: int = 400, tz: tzinfo = timezone.utc):
+        self.tz = tz
         self._lock = threading.Lock()
         self.version = 0
         self._log: deque = deque(maxlen=log_size)
@@ -87,7 +88,7 @@ class Monitor:
             self._log_seq += 1
             self._log.append({
                 "id": self._log_seq,
-                "ts": time.strftime("%H:%M:%S", time.localtime(record.created)),
+                "ts": datetime.fromtimestamp(record.created, self.tz).strftime("%H:%M:%S"),
                 "level": record.levelname,
                 "logger": record.name,
                 "message": message,
