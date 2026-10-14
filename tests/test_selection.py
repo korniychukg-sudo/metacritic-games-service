@@ -60,22 +60,40 @@ def test_partly_taken_page_is_resumed_next_run():
     assert second.state.browse_offset == 24
 
 
-def test_new_day_starts_from_new_releases_again():
-    src = Source(items(1, 20), {0: items(1, 24)})
-    yesterday = DayState("2026-10-13", new_releases_done=True, browse_offset=96)
-    sel = run(DayState("2026-10-14"), set(), src)
-    assert sel.items[0][1] == "new-releases"
-    assert yesterday.browse_offset == 96
+def test_new_day_starts_from_new_releases_again(db):
+    src = Source(items(1, 20), {0: items(1, 24), 4: items(97, 24)})
+    db.save_day_state(DayState("2026-10-13", new_releases_done=True, browse_offset=96))
+    assert db.get_day_state("2026-10-13").browse_offset == 96
+    today = db.get_day_state("2026-10-14")
+    assert today.new_releases_done is False and today.browse_offset == 0
+    sel = run(today, set(), src)
+    assert sel.items[0][1] == "new-releases" and {s for _, s in sel.items} == {"new-releases"}
+    assert src.browse_calls == []
+    assert db.get_day_state("2026-10-13").browse_offset == 96
 
 
-def test_limit_smaller_than_block_keeps_block_open():
-    src = Source(items(1, 20), {0: items(1, 24)})
+def test_limit_smaller_than_block_keeps_block_open_then_fills_from_see_all():
+    src = Source(items(1, 20), {0: items(1, 24), 1: items(25, 24)})
     sel = run(DayState("d"), set(), src, batch=5)
     assert len(sel.items) == 5
     assert sel.state.new_releases_done is False
+    assert src.browse_calls == []
     sel2 = run(sel.state, {i.id for i, _ in sel.items}, src, batch=20)
-    assert [i.id for i, _ in sel2.items] == list(range(6, 21))
+    assert [(i.id, s) for i, s in sel2.items[:15]] == [(n, "new-releases") for n in range(6, 21)]
+    assert [(i.id, s) for i, s in sel2.items[15:]] == [(n, "browse:p1") for n in range(21, 25)] + [(25, "browse:p2")]
     assert sel2.state.new_releases_done is True
+    assert sel2.state.browse_offset == 24
+
+
+def test_run_that_finishes_new_releases_after_retries_fills_the_batch():
+    src = Source(items(1, 20), {0: items(1, 24)})
+    retry = [ListItem(id=500, slug="flaky", title="Flaky")]
+    sel = select_batch(DayState("d"), set(range(1, 11)), src.fetch_new, src.fetch_browse, batch_size=20,
+                       retries=retry)
+    sources = [s for _, s in sel.items]
+    assert sources[0] == "retry" and sources[1:11] == ["new-releases"] * 10
+    assert sources[11:] == ["browse:p1"] * 4 and len(sel.items) == 15
+    assert sel.state.new_releases_done is True
 
 
 def test_new_releases_already_processed_falls_through_to_browse():

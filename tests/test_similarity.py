@@ -56,3 +56,37 @@ def test_scales_to_a_few_thousand_games():
     sim = compute_similar(games)
     assert len(sim) == 1500
     assert time.time() - t < 60
+
+
+def test_related_genres_count_as_weak_similarity_with_honest_labels():
+    from app.similarity import genre_families
+
+    assert genre_families(["Action RPG"]) == {"ролевые", "экшен"}
+    assert genre_families(["Action Adventure"]) == {"экшен", "приключения"}
+    assert genre_families(["Auto Racing"]) == genre_families(["Arcade Racing"]) == {"гонки"}
+    assert genre_families(["Compilation"]) == set()
+    games = [
+        GameFeatures(1, "Valor Mortis", "Souls-like set in a gothic city.", ["Action RPG"], [], ["One More Level"],
+                     ["PC"]),
+        GameFeatures(2, "Echo Weaver", "Explore a ruined castle and weave echoes.", ["Metroidvania"], [], ["Tiny"],
+                     ["PC"]),
+        GameFeatures(3, "Planet Zoo 2", "Build and manage a zoo.", ["Tycoon"], [], ["Frontier"], ["PC"]),
+        GameFeatures(4, "Truckful", "Deliver cargo across the mountains.", ["Action Adventure"], [], ["Small"],
+                     ["PC"]),
+    ]
+    sim = compute_similar(games, top_n=5)
+    assert {x["id"] for x in sim[1]} == {2, 4}
+    assert all(x["weak"] and "близкий жанр" in x["reasons"] for x in sim[1])
+    assert all(x["id"] != 3 for x in sim[1])
+    assert sim[3] == []
+
+
+def test_strong_matches_come_first_and_weak_fill_is_capped():
+    games = [GameFeatures(1, "Alpha", "Space shooter.", ["FPS"], [], ["A"], ["PC"])]
+    games += [GameFeatures(i, f"Game {i}", f"Unrelated {i}.", ["FPS"] if i < 4 else ["Metroidvania"], [], [f"S{i}"],
+                           ["PC"]) for i in range(2, 10)]
+    lst = compute_similar(games, top_n=5)[1]
+    assert [x.get("weak", False) for x in lst] == [False, False, True, True, True]
+    assert {x["id"] for x in lst[:2]} == {2, 3} and all("общий жанр" in x["reasons"] for x in lst[:2])
+    assert all(x["id"] >= 4 and x["reasons"][0] == "близкий жанр" for x in lst[2:])
+    assert len(compute_similar(games, top_n=2)[1]) == 2

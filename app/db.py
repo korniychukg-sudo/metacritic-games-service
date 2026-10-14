@@ -2,8 +2,10 @@ import json
 import logging
 import os
 import queue
+import re
 import sqlite3
 import threading
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -132,7 +134,74 @@ MIGRATIONS: list[list[str]] = [
     [
         "ALTER TABLE games ADD COLUMN trailer TEXT",
     ],
+    [
+        "fix_title_search",
+        "fix_non_russian_summaries",
+        "fix_description_letsplays",
+        "UPDATE games SET letsplay = json_set(letsplay, '$.updated_at', '2000-01-01T00:00:00+00:00', "
+        "'$.checked_at', '2000-01-01T00:00:00+00:00') "
+        "WHERE json_extract(letsplay, '$.method') IN ('llm-transcript', 'llm-whisper') "
+        "AND json_extract(letsplay, '$.has_commentary') IS NULL",
+    ],
 ]
+
+
+def fix_title_search(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("SELECT id, title FROM games").fetchall()
+    conn.executemany("UPDATE games SET title_search=? WHERE id=?", [(search_key(r[1]), r[0]) for r in rows])
+
+
+def fix_non_russian_summaries(conn: sqlite3.Connection) -> None:
+    from .metacritic import Review
+    from .summarize import extractive_review_summary, extractive_transcript_summary, is_russian
+
+    def russian(summary: dict, fields: tuple[str, ...]) -> bool:
+        for f in fields:
+            value = summary.get(f)
+            for item in (value if isinstance(value, list) else [value]):
+                if item and not is_russian(item):
+                    return False
+        return True
+
+    rows = conn.execute("SELECT id, critic_summary, user_summary, critic_reviews, user_reviews, letsplay "
+                        "FROM games").fetchall()
+    for row in rows:
+        gid = row[0]
+        for column, kind, raw, reviews_raw in (("critic_summary", "critic", row[1], row[3]),
+                                               ("user_summary", "user", row[2], row[4])):
+            summary = json.loads(raw) if raw else None
+            if not summary or summary.get("method") != "llm" or russian(summary, ("likes", "dislikes", "verdict")):
+                continue
+            reviews = [Review(**r) for r in json.loads(reviews_raw or "[]")]
+            if not reviews:
+                continue
+            fallback = extractive_review_summary(reviews, kind, summary.get("review_count") or len(reviews))
+            fixed = {k: v for k, v in summary.items() if k not in ("model",)}
+            fixed.update(fallback)
+            fixed["note"] = "LLM ответила не на русском, показаны цитаты; резюме пересчитается через LLM"
+            conn.execute(f"UPDATE games SET {column}=? WHERE id=?", (_dumps(fixed), gid))
+        lp = json.loads(row[5]) if row[5] else None
+        if (lp and lp.get("method") in ("llm-transcript", "llm-whisper") and lp.get("transcript_excerpt")
+                and not russian(lp, ("summary", "pros", "cons", "verdict"))):
+            source = lp["method"].split("-", 1)[1]
+            lp.update(extractive_transcript_summary(lp["transcript_excerpt"]), method=f"extractive-{source}")
+            conn.execute("UPDATE games SET letsplay=? WHERE id=?", (_dumps(lp), gid))
+
+
+def fix_description_letsplays(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("SELECT id, letsplay FROM games WHERE json_extract(letsplay, '$.method') = 'llm-description'")
+    for gid, raw in rows.fetchall():
+        lp = json.loads(raw)
+        description = ((lp.get("video") or {}).get("description") or "")[:600]
+        lp.update(method="description", summary=description, pros=[], cons=[], verdict="")
+        conn.execute("UPDATE games SET letsplay=? WHERE id=?", (_dumps(lp), gid))
+
+
+DATA_FIXES = {
+    "fix_title_search": fix_title_search,
+    "fix_non_russian_summaries": fix_non_russian_summaries,
+    "fix_description_letsplays": fix_description_letsplays,
+}
 
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -164,7 +233,15 @@ def _dumps(v) -> str:
 
 
 def search_key(text: str) -> str:
-    return " ".join((text or "").casefold().split())
+    text = unicodedata.normalize("NFKD", text or "")
+    text = "".join(ch for ch in text if not unicodedata.combining(ch)).casefold()
+    text = re.sub(r"['’`.,]", "", text)
+    text = re.sub(r"[^\w%+#&]+|_", " ", text)
+    return " ".join(text.split())
+
+
+def search_tokens(query: str) -> list[str]:
+    return search_key(query).split()[:8]
 
 
 def like_escape(text: str) -> str:
@@ -187,9 +264,12 @@ def migrate(conn: sqlite3.Connection) -> int:
                     conn.execute(statement)
         for number in range(version + 1, SCHEMA_VERSION + 1):
             for statement in MIGRATIONS[number - 1]:
-                conn.execute(statement)
+                if statement in DATA_FIXES:
+                    DATA_FIXES[statement](conn)
+                else:
+                    conn.execute(statement)
             conn.execute(f"PRAGMA user_version = {number}")
-            log.info("Database migrated to schema v%d", number)
+            log.info("База обновлена до схемы v%d", number)
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -329,7 +409,7 @@ class Database:
             if not exists:
                 clash = c.execute("SELECT id FROM games WHERE slug=?", (g.slug,)).fetchone()
                 if clash:
-                    log.info("Slug %s moved from game %s to %s, replacing the old row", g.slug, clash[0], g.id)
+                    log.info("Адрес %s перешёл от игры %s к игре %s, старая запись заменена", g.slug, clash[0], g.id)
                     c.execute("DELETE FROM games WHERE id=?", (clash[0],))
             values = {
                 "id": g.id,
@@ -422,7 +502,8 @@ class Database:
                 "WHERE json_extract(critic_summary, '$.method') = 'extractive' "
                 "OR json_extract(user_summary, '$.method') = 'extractive' "
                 "OR (json_extract(letsplay, '$.method') IN ('extractive-transcript', 'extractive-whisper') "
-                "    AND json_extract(letsplay, '$.transcript_excerpt') IS NOT NULL) "
+                "    AND json_extract(letsplay, '$.transcript_excerpt') IS NOT NULL "
+                "    AND json_extract(letsplay, '$.llm_no_commentary') IS NULL) "
                 "OR (json_extract(letsplay, '$.method') = 'description' "
                 "    AND json_extract(letsplay, '$.video.description') IS NOT NULL) "
                 "ORDER BY backfill_at IS NOT NULL, backfill_at, updated_at DESC LIMIT ?", (limit,)).fetchall()
@@ -469,9 +550,12 @@ class Database:
             params.append(platform)
             meta_expr, user_expr = "p.metascore", "p.userscore"
         where = ""
-        if q and search_key(q):
-            where = "WHERE g.title_search LIKE ? ESCAPE '\\'"
-            params.append(f"%{like_escape(search_key(q))}%")
+        tokens = search_tokens(q or "")
+        if tokens:
+            where = "WHERE " + " AND ".join("g.title_search LIKE ? ESCAPE '\\'" for _ in tokens)
+            params.extend(f"%{like_escape(t)}%" for t in tokens)
+        elif q and q.strip():
+            where = "WHERE 0"
         base = f"FROM games g {join} {where}"
         order = f"{sort_col} IS NULL, {sort_col} {direction}, g.release_date DESC, g.id DESC"
         sql = (
@@ -544,6 +628,12 @@ class Database:
     def recent_runs(self, limit: int = 10) -> list[dict]:
         with self.conn() as c:
             return [dict(r) for r in c.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,))]
+
+    def public_runs(self, limit: int = 10) -> list[dict]:
+        with self.conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT id, trigger, day, started_at, finished_at, status, selected, ok, failed, sources, message "
+                "FROM runs ORDER BY id DESC LIMIT ?", (limit,))]
 
     def last_run(self) -> dict | None:
         runs = self.recent_runs(1)

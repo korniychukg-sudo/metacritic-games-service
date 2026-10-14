@@ -54,12 +54,12 @@ def select_batch(
         try:
             items = fetch_new_releases()
         except Exception as exc:
-            log.warning("New Releases unavailable, falling back to SEE ALL for this run: %s", exc)
+            log.warning("New Releases недоступен, в этом запуске берём SEE ALL: %s", exc)
             sel.errors.append(("new-releases", exc))
         else:
             if take(items, "new-releases"):
                 state.new_releases_done = True
-            if any(src == "new-releases" for _, src in sel.items) or len(sel.items) >= batch_size:
+            if len(sel.items) >= batch_size:
                 return sel
 
     while len(sel.items) < batch_size and sel.pages_fetched < max_pages:
@@ -68,7 +68,7 @@ def select_batch(
         except Exception as exc:
             if not sel.items:
                 raise
-            log.warning("SEE ALL page at offset %d unavailable: %s", state.browse_offset, exc)
+            log.warning("Страница SEE ALL с позиции %d недоступна: %s", state.browse_offset, exc)
             sel.errors.append((f"browse:{state.browse_offset}", exc))
             break
         sel.pages_fetched += 1

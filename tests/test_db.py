@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -90,11 +91,66 @@ def test_like_wildcards_are_escaped(db):
     db.upsert_game(make_game(2, "b", "Snake_Pass"), "x")
     db.upsert_game(make_game(3, "c", "Plain Game"), "x")
     assert db.list_games(q="%")[1] == 1
-    assert db.list_games(q="_")[1] == 1
     assert db.list_games(q="100%")[0][0]["slug"] == "a"
-    assert db.list_games(q="e_p")[1] == 1
+    assert db.list_games(q="_")[1] == 0
+    assert [g["slug"] for g in db.list_games(q="snake_pass")[0]] == ["b"]
     assert db.list_games(q="   ")[1] == 3
     assert db.list_games(q="\\")[1] == 0
+
+
+def test_title_search_ignores_punctuation_and_matches_every_word(db):
+    db.upsert_game(make_game(1, "dd2", "Dragon's Dogma 2: Dark Arisen"), "x")
+    db.upsert_game(make_game(2, "bolt", "Warhammer 40,000: Boltgun 2"), "x")
+    db.upsert_game(make_game(3, "kh", "Kingdom Hearts Collection I ~ III"), "x")
+    db.upsert_game(make_game(4, "kh3", "Kingdom Hearts III"), "x")
+    for query, slugs in (("dragons dogma", ["dd2"]), ("dragon's", ["dd2"]), ("DOGMA dragons", ["dd2"]),
+                         ("warhammer 40000", ["bolt"]), ("40,000", ["bolt"]), ("boltgun 2", ["bolt"]),
+                         ("kingdom hearts collection i-iii", ["kh"]), ("hearts collection", ["kh"]),
+                         ("dogma boltgun", [])):
+        assert sorted(g["slug"] for g in db.list_games(q=query)[0]) == slugs, query
+
+
+def test_migration_recomputes_search_keys_and_flags_bad_summaries(tmp_path):
+    from app import db as dbmod
+
+    path = tmp_path / "old.db"
+    old = Database(str(path))
+    old.upsert_game(make_game(1, "dd2", "Dragon's Dogma 2"), "x")
+    review = {"kind": "user", "sentiment": "negative", "quote": "Botched remaster and AI slop everywhere, sadly.",
+              "score": 2.0, "author": "u", "url": None, "date": None, "platform": None}
+    english = {"likes": ["Хорошая графика"], "dislikes": ["botched remaster process"], "verdict": "Игра спорная.",
+               "method": "llm", "model": "m", "review_count": 1, "sample_size": 1, "reviews_hash": "h"}
+    russian = {"likes": ["Отличная боёвка в духе Sekiro"], "dislikes": [], "verdict": "Хорошо.", "method": "llm"}
+    unverified = {"status": "ok", "method": "llm-transcript", "summary": "Автор ценит производительность",
+                  "updated_at": "2026-10-15T00:00:00+00:00", "checked_at": "2026-10-15T00:00:00+00:00",
+                  "video": {"video_id": "zzzzzzzzzzz"}}
+    old2 = Database(str(path))
+    old2.upsert_game(make_game(2, "kh", "Kingdom Hearts Collection I ~ III"), "x")
+    old2.set_json(2, "letsplay", unverified)
+    old2.close()
+    letsplay = {"status": "no_transcript", "method": "llm-description", "summary": "Автор ролика отмечает…",
+                "pros": ["выдумано"], "cons": [], "verdict": "x",
+                "video": {"video_id": "bGBXM6oxbag", "title": "t", "description": "Full walkthrough of the game."}}
+    with old.write() as c:
+        c.execute("UPDATE games SET title_search='dragon''s dogma 2', user_summary=?, critic_summary=?, "
+                  "user_reviews=?, letsplay=? WHERE id=1",
+                  (json.dumps(english), json.dumps(russian), json.dumps([review]), json.dumps(letsplay)))
+    old.close()
+    raw = sqlite3.connect(path)
+    raw.execute(f"PRAGMA user_version = {dbmod.SCHEMA_VERSION - 1}")
+    raw.commit()
+    raw.close()
+    db = Database(str(path))
+    g = db.get_game(slug="dd2")
+    assert g["title_search"] == "dragons dogma 2"
+    assert db.list_games(q="dragons dogma")[1] == 1
+    assert g["user_summary"]["method"] == "extractive" and "botched remaster process" not in g["user_summary"]["dislikes"]
+    assert g["critic_summary"]["method"] == "llm"
+    assert g["letsplay"]["method"] == "description" and g["letsplay"]["pros"] == []
+    assert g["letsplay"]["summary"] == "Full walkthrough of the game."
+    assert [x["slug"] for x in db.games_with_fallbacks(5)] == ["dd2"]
+    kh = db.get_game(slug="kh")["letsplay"]
+    assert kh["updated_at"].startswith("2000-") and kh["checked_at"].startswith("2000-") and kh["summary"]
 
 
 def test_failed_games_are_retryable_until_the_cap(db):

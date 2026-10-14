@@ -70,7 +70,33 @@ def _norm_set(values: list[str]) -> set[str]:
     return {v.strip().lower() for v in values if v and v.strip()}
 
 
+GENRE_FAMILIES = (
+    ("ролевые", ("rpg", "roguelike", "roguelite", "dungeon crawler", "mmo")),
+    ("экшен", ("action", "fps", "shooter", "beat-'em-up", "beat-em-up", "hack and slash", "fighting",
+               "metroidvania", "platformer", "survival", "stealth", "combat")),
+    ("стратегии", ("strategy", "tactics", "rts", "4x", "tower defense", "moba", "wargame")),
+    ("симуляторы", ("sim", "tycoon", "management", "career", "builder", "farming", "life")),
+    ("гонки", ("racing", "driving", "kart")),
+    ("приключения", ("adventure", "point-and-click", "visual novel", "narrative", "interactive")),
+    ("головоломки", ("puzzle", "board", "card", "trivia")),
+    ("спорт", ("sport", "football", "soccer", "basketball", "golf", "tennis", "hockey", "baseball", "wrestling")),
+)
+
+
+def genre_families(genres: list[str]) -> set[str]:
+    out = set()
+    for g in _norm_set(genres):
+        words = set(re.findall(r"[a-z0-9'-]+", g))
+        for family, keys in GENRE_FAMILIES:
+            if any((k in g) if " " in k or "-" in k else (k in words or any(w.startswith(k) for w in words))
+                   for k in keys):
+                out.add(family)
+    return out
+
+
 MIN_DESC = 0.06
+WEAK_DESC = 0.02
+MAX_WEAK = 3
 
 
 def compute_similar(games: list[GameFeatures], top_n: int = 5, min_score: float = 0.05) -> dict[int, list[dict]]:
@@ -86,6 +112,7 @@ def compute_similar(games: list[GameFeatures], top_n: int = 5, min_score: float 
     meta = {
         g.id: {
             "genre": _norm_set(g.genres),
+            "family": genre_families(g.genres),
             "franchise": _norm_set(g.franchises),
             "developer": _norm_set(g.developers),
             "platform": _norm_set(g.platforms),
@@ -94,7 +121,7 @@ def compute_similar(games: list[GameFeatures], top_n: int = 5, min_score: float 
     }
     by_key: dict[tuple[str, str], list[int]] = defaultdict(list)
     for gid, m in meta.items():
-        for kind in ("genre", "franchise", "developer"):
+        for kind in ("genre", "family", "franchise", "developer"):
             for value in m[kind]:
                 by_key[(kind, value)].append(gid)
 
@@ -107,35 +134,46 @@ def compute_similar(games: list[GameFeatures], top_n: int = 5, min_score: float 
                     cos[other] += w * w2
         candidates = set(cos)
         m = meta[g.id]
-        for kind in ("genre", "franchise", "developer"):
+        for kind in ("genre", "family", "franchise", "developer"):
             for value in m[kind]:
                 candidates.update(o for o in by_key[(kind, value)] if o != g.id)
-        scored = []
+        strong, weak = [], []
         for other in candidates:
             om = meta[other]
+            exact_genre = _jaccard(m["genre"], om["genre"])
+            family = _jaccard(m["family"], om["family"])
             parts = {
                 "desc": cos.get(other, 0.0),
-                "genre": _jaccard(m["genre"], om["genre"]),
+                "genre": max(exact_genre, 0.5 * family),
                 "franchise": 1.0 if m["franchise"] & om["franchise"] else 0.0,
                 "developer": 1.0 if m["developer"] & om["developer"] else 0.0,
                 "platform": _jaccard(m["platform"], om["platform"]),
             }
-            meaningful = parts["franchise"] or parts["developer"] or parts["genre"] or parts["desc"] >= MIN_DESC
             score = sum(WEIGHTS[k] * v for k, v in parts.items())
-            if not meaningful or score < min_score:
-                continue
             reasons = []
             if parts["franchise"]:
                 reasons.append("та же франшиза")
             if parts["developer"]:
                 reasons.append("тот же разработчик")
-            if parts["genre"]:
+            if exact_genre:
                 reasons.append("общий жанр")
+            elif family:
+                reasons.append("близкий жанр")
             if parts["desc"] >= MIN_DESC:
                 reasons.append("похожее описание")
+            elif parts["desc"] >= WEAK_DESC:
+                reasons.append("немного похожее описание")
             if parts["platform"] >= 0.5:
                 reasons.append("те же платформы")
-            scored.append((score, other, reasons))
-        scored.sort(key=lambda x: (-x[0], x[1]))
-        result[g.id] = [{"id": o, "score": round(s, 4), "reasons": r} for s, o, r in scored[:top_n]]
+            meaningful = parts["franchise"] or parts["developer"] or exact_genre or parts["desc"] >= MIN_DESC
+            if meaningful and score >= min_score:
+                strong.append((score, other, reasons))
+            elif family or parts["desc"] >= WEAK_DESC:
+                weak.append((score, other, reasons))
+        strong.sort(key=lambda x: (-x[0], x[1]))
+        weak.sort(key=lambda x: (-x[0], x[1]))
+        picked = [{"id": o, "score": round(sc, 4), "reasons": r} for sc, o, r in strong[:top_n]]
+        room = min(MAX_WEAK, top_n - len(picked))
+        picked += [{"id": o, "score": round(sc, 4), "reasons": r, "weak": True} for sc, o, r in weak[:max(0, room)]]
+        result[g.id] = picked
     return result
