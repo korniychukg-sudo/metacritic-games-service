@@ -29,8 +29,12 @@ class Killed(BaseException):
 def test_first_run_processes_new_releases_and_fills_cards(settings, db):
     settings.batch_size = 5
     clock = FakeClock()
-    p = make(settings, db, clock=clock)
+    mc = FakeMetacritic()
+    seen = []
+    mc.on_game = lambda slug: seen.append((db.last_run()["selected"], db.last_run()["sources"]))
+    p = make(settings, db, mc=mc, clock=clock)
     res = p.run("manual")
+    assert seen[0] == (5, "new-releases")
     assert res["status"] == "ok" and res["selected"] == 5 and res["ok"] == 5
     assert db.count_games() == 5
     day = settings.today(clock())

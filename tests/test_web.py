@@ -295,3 +295,12 @@ def test_head_requests_for_uptime_checks(settings):
     with client:
         assert client.head("/").status_code == 200
         assert client.head("/healthz").status_code == 200
+
+
+def test_russian_plurals():
+    from app.main import ru_plural
+
+    forms = ("оценка", "оценки", "оценок")
+    assert [ru_plural(n, *forms) for n in (1, 2, 5, 11, 12, 21, 22, 25, 101, 111)] == [
+        "оценка", "оценки", "оценок", "оценок", "оценок", "оценка", "оценки", "оценок", "оценка", "оценок"]
+    assert ru_plural(None, *forms) == "оценок"

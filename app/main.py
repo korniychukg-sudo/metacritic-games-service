@@ -30,7 +30,7 @@ from .youtube import VIDEO_ID, YouTubeClient
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PAGE_SIZE = 24
 MAX_PAGE = 10000
-STATIC_VERSION = "5"
+STATIC_VERSION = "6"
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
           "ноября", "декабря"]
 SORT_LABELS = {
@@ -169,6 +169,18 @@ def user_class(score) -> str:
     return "good" if score >= 7.5 else "mixed" if score >= 5 else "bad"
 
 
+def ru_plural(n, one: str, few: str, many: str) -> str:
+    try:
+        n = abs(int(n))
+    except (TypeError, ValueError):
+        return many
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return few
+    return many
+
+
 def fmt_user(score) -> str:
     return "—" if score is None else f"{score:.1f}"
 
@@ -191,7 +203,7 @@ def make_templates(s: Settings) -> Jinja2Templates:
 
     env.filters.update(
         date_ru=fmt_date, num=fmt_num, duration=fmt_duration, meta_class=meta_class, user_class=user_class,
-        user_fmt=fmt_user, dt=fmt_dt, wait=fmt_wait, url=web_url,
+        user_fmt=fmt_user, dt=fmt_dt, wait=fmt_wait, url=web_url, plural=ru_plural,
         method=lambda m: METHOD_LABELS.get(m or "none", m or ""),
         status_ru=lambda st: STATUS_LABELS.get(st, st),
         trigger_ru=lambda t: TRIGGER_LABELS.get(t, t),

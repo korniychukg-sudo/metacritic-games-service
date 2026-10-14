@@ -252,6 +252,7 @@ class Pipeline:
         log.info("Run #%d: selected %d games (%s), browse cursor %d -> %d", run_id, total, sel.sources or "—",
                  state.browse_offset, sel.state.browse_offset)
         self.monitor.set_progress(total=total)
+        self.db.update_run_progress(run_id, total, 0, 0, sel.sources)
         ok = failed = 0
         attempted = 0
         cut = False

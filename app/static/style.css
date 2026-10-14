@@ -217,6 +217,8 @@ summary { cursor: pointer; color: var(--accent); font-size: 14px; }
 footer { border-top: 1px solid var(--border); padding: 18px 0 30px; color: var(--muted); font-size: 13px; }
 
 @media (max-width: 900px) {
+  .run-box { align-items: flex-start; }
+  .run-hint { text-align: left; }
   .filters { grid-template-columns: 1fr 1fr; }
   .filters .q { grid-column: 1 / -1; }
   .two-col, .video { grid-template-columns: 1fr; }

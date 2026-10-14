@@ -15,7 +15,7 @@
       </div>
     </div>
     <div class="hero-scores">
-      <div class="score-box">{{ meta_badge(g.metascore, 'lg') }}<div><strong>Metascore</strong><div class="muted small">{{ g.lead_platform or 'ведущая платформа' }}{% if g.critic_total %}, {{ g.critic_total }} рецензий{% endif %}</div></div></div>
+      <div class="score-box">{{ meta_badge(g.metascore, 'lg') }}<div><strong>Metascore</strong><div class="muted small">{{ g.lead_platform or 'ведущая платформа' }}{% if g.critic_total %}, {{ g.critic_total }} {{ g.critic_total|plural('рецензия', 'рецензии', 'рецензий') }}{% endif %}</div></div></div>
       <div class="score-box">{{ user_badge(g.userscore, 'lg') }}<div><strong>Userscore</strong><div class="muted small">{{ g.lead_platform or 'ведущая платформа' }}</div></div></div>
     </div>
     <dl class="facts">
@@ -42,7 +42,7 @@
         <tr>
           <td><strong>{{ p.name }}</strong> <span class="chip">{{ p.short }}</span>{% if p.is_lead %} <span class="badge">ведущая</span>{% endif %}</td>
           <td><div class="cell-score">{{ meta_badge(p.metascore) }}<span class="muted small">{% if p.critic_count %}{{ p.critic_count }} рец.{% else %}нет рецензий{% endif %}</span></div></td>
-          <td><div class="cell-score">{{ user_badge(p.userscore) }}<span class="muted small">{% if p.user_count %}{{ p.user_count|num }} оценок{% else %}нет оценок{% endif %}</span></div></td>
+          <td><div class="cell-score">{{ user_badge(p.userscore) }}<span class="muted small">{% if p.user_count %}{{ p.user_count|num }} {{ p.user_count|plural('оценка', 'оценки', 'оценок') }}{% else %}нет оценок{% endif %}</span></div></td>
           <td class="muted">{{ p.release_date|date_ru }}</td>
         </tr>
         {% endfor %}
@@ -61,7 +61,7 @@
     <div class="embed"><iframe src="{{ v.embed_url|url }}" title="{{ v.title or 'Трейлер' }}" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></div>
   </details>
   <p class="small muted video-source">Ссылка на видео: <a href="{{ v.url|url }}" target="_blank" rel="noopener noreferrer">{{ v.url }}</a>{% if v.manifest_url|url %} · <a href="{{ v.manifest_url|url }}" target="_blank" rel="noopener noreferrer">HLS</a>{% endif %}
-    {% if v.source == 'youtube' %}<br>На Metacritic у этой игры видео нет, поэтому показан самый подходящий трейлер с YouTube{% if v.channel %} (канал {{ v.channel }}{% if v.views %}, {{ v.views|num }} просмотров{% endif %}){% endif %}.{% endif %}</p>
+    {% if v.source == 'youtube' %}<br>На Metacritic у этой игры видео нет, поэтому показан самый подходящий трейлер с YouTube{% if v.channel %} (канал {{ v.channel }}{% if v.views %}, {{ v.views|num }} {{ v.views|plural('просмотр', 'просмотра', 'просмотров') }}{% endif %}){% endif %}.{% endif %}</p>
   {% else %}
   <p class="small muted">Видео для этой игры нет ни на Metacritic, ни среди трейлеров на YouTube.</p>
   {% endif %}
@@ -76,7 +76,7 @@
       {% if s.likes %}<h3>Нравится</h3><ul class="points likes">{% for x in s.likes %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
       {% if s.dislikes %}<h3>Не нравится</h3><ul class="points dislikes">{% for x in s.dislikes %}<li>{{ x }}</li>{% endfor %}</ul>
       {% else %}<h3>Не нравится</h3><p class="muted small">Заметных претензий в отзывах нет.</p>{% endif %}
-      <div class="method">{{ method_badge(s.method) }} по {{ s.sample_size }} отзывам из {{ s.review_count }} · обновлено {{ s.updated_at|dt }}{% if s.note %}<br>{{ s.note }}{% endif %}</div>
+      <div class="method">{{ method_badge(s.method) }} по {{ s.sample_size }} {{ s.sample_size|plural('отзыву', 'отзывам', 'отзывам') }} из {{ s.review_count }} · обновлено {{ s.updated_at|dt }}{% if s.note %}<br>{{ s.note }}{% endif %}</div>
     {% elif s %}
       <p class="muted">{{ s.verdict or 'Отзывов пока нет.' }}</p>
     {% else %}
@@ -113,7 +113,7 @@
           <span class="play"><span>▶</span></span>
         </a>
         <p class="small video-meta"><a href="https://www.youtube.com/watch?v={{ v.video_id|urlencode }}" target="_blank" rel="noopener noreferrer"><strong>{{ v.title }}</strong></a></p>
-        <p class="small muted video-sub">{{ v.channel or '' }} · {{ v.views|num }} просмотров{% if v.length_seconds %} · {{ v.length_seconds|duration }}{% endif %}</p>
+        <p class="small muted video-sub">{{ v.channel or '' }} · {{ v.views|num }} {{ v.views|plural('просмотр', 'просмотра', 'просмотров') }}{% if v.length_seconds %} · {{ v.length_seconds|duration }}{% endif %}</p>
       </div>
       <div>
         {% if lp.verdict %}<p class="verdict">{{ lp.verdict }}</p>{% endif %}
@@ -141,7 +141,7 @@
       <summary>Другие найденные ролики ({{ lp.candidates|length - 1 }})</summary>
       <ul class="quotes">
         {% for c in lp.candidates if c.video_id != v.video_id %}
-        <li><a href="https://www.youtube.com/watch?v={{ c.video_id|urlencode }}" target="_blank" rel="noopener noreferrer">{{ c.title }}</a> · {{ c.channel }} · {{ c.views|num }} просмотров</li>
+        <li><a href="https://www.youtube.com/watch?v={{ c.video_id|urlencode }}" target="_blank" rel="noopener noreferrer">{{ c.title }}</a> · {{ c.channel }} · {{ c.views|num }} {{ c.views|plural('просмотр', 'просмотра', 'просмотров') }}</li>
         {% endfor %}
       </ul>
     </details>
