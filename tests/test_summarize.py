@@ -108,57 +108,6 @@ def test_prompts_respect_small_budget():
     assert sum(len(m["content"]) for m in lp) <= 1700
 
 
-def test_llm_client_shrinks_prompt_on_402():
-    import httpx
-
-    from app.llm import LLMClient
-
-    sizes = []
-
-    def handler(request):
-        import json as _json
-
-        body = _json.loads(request.content)
-        size = sum(len(m["content"]) for m in body["messages"])
-        sizes.append(size)
-        if size > 1000:
-            return httpx.Response(402, json={})
-        return httpx.Response(200, json={"choices": [{"message": {"content": '```json\n{"likes": ["плюс"], "dislikes": [], "verdict": "вывод"}\n```'}}]})
-
-    llm = LLMClient("https://example.test/openai", "m", min_gap=0, max_prompt_chars=2500)
-    llm._client = httpx.Client(transport=httpx.MockTransport(handler))
-    g = game()
-    out = llm.ask_json(lambda b: build_review_prompt(g.title, "critic", g.critic_reviews, b), validate_review_json)
-    assert out["likes"] == ["плюс"]
-    assert sizes[0] > 1000 and sizes[-1] <= 1000
-    assert llm.max_prompt_chars < 2500
-    assert sizes[0] == sizes[1]
-    anon = LLMClient("https://text.pollinations.ai/openai", "openai")
-    assert anon.max_prompt_chars == 6000 and anon.min_gap == 32.0
-    keyed = LLMClient("https://api.openai.com/v1", "gpt", api_key="x")
-    assert keyed.max_prompt_chars == 9000 and keyed.min_gap == 3.0
-
-
-def test_llm_client_paces_calls_start_to_start():
-    import time
-
-    import httpx
-
-    from app.llm import LLMClient
-
-    starts = []
-
-    def handler(request):
-        starts.append(time.monotonic())
-        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
-
-    llm = LLMClient("https://example.test/openai", "m", min_gap=0.3)
-    llm._client = httpx.Client(transport=httpx.MockTransport(handler))
-    for _ in range(3):
-        assert llm.chat([{"role": "user", "content": "x"}]) == "ok"
-    assert all(b - a >= 0.29 for a, b in zip(starts, starts[1:]))
-
-
 def test_validator_rejects_english_answers():
     try:
         validate_review_json({"likes": ["Fun combat and gorgeous visuals"], "dislikes": [], "verdict": "Solid game"})

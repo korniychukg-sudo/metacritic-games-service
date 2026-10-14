@@ -3,7 +3,7 @@ import logging
 import re
 
 from .config import iso, utcnow
-from .llm import LLMClient, LLMError
+from .llm import LLMClient, LLMDisabled, LLMError, LLMSkipped
 from .metacritic import Review
 
 log = logging.getLogger("summarize")
@@ -165,6 +165,13 @@ def validate_review_json(value: dict) -> dict:
     return {"likes": likes, "dislikes": dislikes, "verdict": verdict}
 
 
+SKIP_NOTES = {
+    LLMSkipped: "LLM временно пропущена после нескольких неудач подряд, показаны ключевые цитаты из отзывов "
+                "(на языке оригинала). Резюме пересчитается через LLM на следующих запусках",
+    LLMDisabled: "LLM отключена настройкой, показаны ключевые цитаты из отзывов (на языке оригинала)",
+}
+
+
 def summarize_reviews(llm: LLMClient | None, title: str, kind: str, reviews: list[Review], total: int) -> dict:
     base = {"review_count": total, "sample_size": len(reviews), "reviews_hash": reviews_hash(reviews),
             "updated_at": iso(utcnow())}
@@ -175,6 +182,10 @@ def summarize_reviews(llm: LLMClient | None, title: str, kind: str, reviews: lis
             result = llm.ask_json(lambda budget: build_review_prompt(title, kind, reviews, budget),
                                   validate_review_json)
             return {**base, **result, "method": "llm", "model": llm.model}
+        except (LLMSkipped, LLMDisabled) as exc:
+            fallback = extractive_review_summary(reviews, kind, total)
+            fallback["note"] = SKIP_NOTES[type(exc)]
+            return {**base, **fallback}
         except LLMError as exc:
             log.warning("LLM summary (%s) for %s failed, using extractive: %s", kind, title, exc)
             fallback = extractive_review_summary(reviews, kind, total)
