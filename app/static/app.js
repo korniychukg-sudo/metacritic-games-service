@@ -30,10 +30,21 @@
     }
   }
 
+  function pad(n) {
+    return (n < 10 ? "0" : "") + n;
+  }
+
   function wait(seconds) {
     seconds = Math.max(0, Math.ceil(seconds));
-    var m = Math.floor(seconds / 60), s = seconds % 60;
-    return m + ":" + (s < 10 ? "0" : "") + s;
+    var h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
+    return h ? h + ":" + pad(m) + ":" + pad(s) : m + ":" + pad(s);
+  }
+
+  function secs(seconds) {
+    if (seconds == null) return "идёт";
+    if (seconds < 60) return seconds + " с";
+    var m = Math.floor(seconds / 60);
+    return m < 60 ? m + " мин " + pad(seconds % 60) + " с" : Math.floor(m / 60) + " ч " + pad(m % 60) + " мин";
   }
 
   function setText(id, value) {
@@ -48,6 +59,7 @@
 
   var manual = null;
   var pending = false;
+  var wasRunning = null;
 
   function renderButton() {
     var btn = document.getElementById("run-btn");
@@ -64,8 +76,13 @@
       var left = manual.available_at ? (new Date(manual.available_at) - Date.now()) / 1000 : manual.retry_after;
       if (left > 0) {
         disabled = true;
-        text = manual.code === "cap" ? "Лимит ручных запусков на сегодня" : "Запуск через " + wait(left);
-        hintText = manual.reason || hintText;
+        if (manual.code === "cap") {
+          text = "Лимит ручных запусков на сегодня";
+          hintText = manual.reason || hintText;
+        } else {
+          text = "Запуск через " + wait(left);
+          hintText = "Можно запустить через " + wait(left) + "." + (manual.reason ? " " + manual.reason + "." : "");
+        }
       }
     }
     btn.disabled = disabled;
@@ -76,6 +93,11 @@
   function render(st) {
     var p = st.progress || {};
     var running = !!st.running;
+    if (wasRunning && !running) {
+      var flashEl = document.getElementById("flash");
+      if (flashEl) flashEl.hidden = true;
+    }
+    wasRunning = running;
     document.getElementById("run-dot").className = "dot " + (running ? "running" : "idle");
     setText("run-state", running ? "Идёт обработка" : "Ожидание");
     setText("run-step", p.step ? p.step + (p.current && p.step.indexOf(p.current) < 0 ? ": " + p.current : "") : "");
@@ -95,12 +117,16 @@
     setText("t-errors-sub", "всего " + t.errors_total);
     var last = st.last_run;
     setText("t-last", last ? fmt(last.started_at) : "—");
-    setText("t-last-sub", last ? (STATUS[last.status] || last.status) + " · " + last.ok + "/" + last.selected : "");
-    setText("t-next", fmt(st.next_run_at));
+    setText("t-last-sub", last
+      ? (STATUS[last.status] || last.status) + " · " + last.ok + "/" + last.selected + " · " + (last.source_label || "—")
+      : "запусков ещё не было");
+    var cfg = st.config || {};
+    setText("t-next", cfg.scheduler_enabled === false ? "вручную" : fmt(st.next_run_at));
     var ds = st.day_state || {};
+    var pageSize = cfg.browse_page_size || 24;
     setText("t-cursor", ds.new_releases_done
-      ? "New Releases пройден, SEE ALL с позиции " + ds.browse_offset
-      : "сегодня ещё идёт блок New Releases");
+      ? "New Releases пройден, дальше SEE ALL со страницы " + (Math.floor((ds.browse_offset || 0) / pageSize) + 1)
+      : (st.runs_today ? "сегодня ещё не пройден блок New Releases" : "сегодня первым будет обработан блок New Releases"));
 
     (st.workers || []).forEach(function (w) {
       var card = document.querySelector('[data-worker="' + w.name + '"]');
@@ -113,15 +139,18 @@
     var runs = document.getElementById("runs");
     if (runs) {
       runs.innerHTML = (st.runs || []).length ? st.runs.map(function (r) {
-        return "<tr><td>" + esc(r.id) + "</td><td>" + esc(fmt(r.started_at)) + "</td><td>" + esc(TRIGGER[r.trigger] || r.trigger) +
+        return '<tr title="' + esc(r.message) + '"><td>' + esc(r.id) + "</td><td>" + esc(fmt(r.started_at)) + "</td><td>" +
+          esc(r.trigger_label || TRIGGER[r.trigger] || r.trigger) + "</td><td>" + esc(r.source_label || "—") +
           '</td><td><span class="dot inline ' + esc(r.status) + '"></span> ' + esc(STATUS[r.status] || r.status) +
-          "</td><td>" + esc(r.ok) + "/" + esc(r.selected) + (r.failed ? ", ошибок " + esc(r.failed) : "") + "</td></tr>";
-      }).join("") : '<tr><td colspan="5" class="muted">Запусков ещё не было</td></tr>';
+          (r.message ? '<div class="muted small run-msg">' + esc(r.message) + "</div>" : "") +
+          "</td><td>" + esc(r.ok) + "/" + esc(r.selected) + (r.failed ? ", ошибок " + esc(r.failed) : "") +
+          "</td><td>" + esc(secs(r.seconds)) + "</td></tr>";
+      }).join("") : '<tr><td colspan="7" class="muted">Запусков ещё не было</td></tr>';
     }
     var errors = document.getElementById("errors");
     if (errors) {
       errors.innerHTML = (st.errors || []).length ? st.errors.map(function (e) {
-        return "<tr><td>" + esc(fmt(e.at)) + "</td><td>" + esc(e.slug || "—") + '<br><span class="muted small">' + esc(e.step) +
+        return "<tr><td>" + esc(fmt(e.at)) + "</td><td>" + esc(e.slug || "—") + '<br><span class="muted small">' + esc(e.step_label || e.step) +
           '</span></td><td class="small">' + esc(e.message) + "</td></tr>";
       }).join("") : '<tr><td colspan="3" class="muted">Ошибок нет</td></tr>';
     }
@@ -157,6 +186,7 @@
     if (bar) setProgress(Number(bar.dataset.pct || 0));
     if (form) {
       var d = form.dataset;
+      wasRunning = d.running === "1";
       manual = {
         code: d.code || "ok",
         available_at: d.availableAt || null,

@@ -13,3 +13,10 @@
 {% set m = method or 'none' %}
 <span class="badge {% if m.startswith('llm') %}llm{% elif m == 'none' %}{% else %}warn{% endif %}">{{ m|method }}</span>
 {%- endmacro %}
+{% macro similar_tile(s) -%}
+<a href="/game/{{ s.slug|urlencode }}">
+  {{ cover(s.cover_url, s.title) }}
+  <span class="sim-title">{{ s.title }}</span>
+  <span class="chips">{{ meta_badge(s.metascore) }}{% for r in s.reasons[:2] %}<span class="chip">{{ r }}</span>{% endfor %}</span>
+</a>
+{%- endmacro %}

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import meta_badge, user_badge, cover, method_badge %}
+{% from "_macros.html" import meta_badge, user_badge, cover, method_badge, similar_tile %}
 {% block title %}{{ g.title }} · Игры Metacritic{% endblock %}
 {% block content %}
 <p class="small"><a href="/">← Все игры</a></p>
@@ -16,7 +16,8 @@
     </div>
     <div class="hero-scores">
       <div class="score-box">{{ meta_badge(g.metascore, 'lg') }}<div><strong>Metascore</strong><div class="muted small">{{ g.lead_platform or 'ведущая платформа' }}{% if g.critic_total %}, {{ g.critic_total }} {{ g.critic_total|plural('рецензия', 'рецензии', 'рецензий') }}{% endif %}</div></div></div>
-      <div class="score-box">{{ user_badge(g.userscore, 'lg') }}<div><strong>Userscore</strong><div class="muted small">{{ g.lead_platform or 'ведущая платформа' }}</div></div></div>
+      {% set lead = g.platforms|selectattr('is_lead')|first %}
+      <div class="score-box">{{ user_badge(g.userscore, 'lg') }}<div><strong>Userscore</strong><div class="muted small">{{ g.lead_platform or 'ведущая платформа' }}{% if lead and lead.user_count %}, {{ lead.user_count|num }} {{ lead.user_count|plural('оценка', 'оценки', 'оценок') }}{% endif %}</div></div></div>
     </div>
     <dl class="facts">
       <dt>Разработчик</dt><dd>{{ (g.developers or [])|join(', ') or '—' }}</dd>
@@ -27,7 +28,7 @@
     </dl>
     <div class="actions">
       <a class="btn" href="{{ g.metacritic_url }}" target="_blank" rel="noopener noreferrer">Открыть на Metacritic</a>
-      {% if g.video %}<a class="btn ghost" href="{{ g.video.url|url }}" target="_blank" rel="noopener noreferrer">Трейлер{% if g.video.source == 'youtube' %} (YouTube){% endif %}</a>{% endif %}
+      {% if g.video %}<a class="btn ghost" href="{{ g.video.url|url }}" target="_blank" rel="noopener noreferrer">{% if g.video.base_game %}Трейлер оригинальной игры{% else %}Трейлер{% endif %}{% if g.video.source == 'youtube' %} (YouTube){% endif %}</a>{% endif %}
     </div>
   </div>
 </section>
@@ -35,14 +36,14 @@
 <section class="section card pad">
   <h2>Оценки по платформам</h2>
   <div class="table-scroll">
-    <table>
+    <table class="platforms">
       <thead><tr><th>Платформа</th><th>Metascore</th><th>Userscore</th><th>Релиз</th></tr></thead>
       <tbody>
         {% for p in g.platforms %}
         <tr>
-          <td><strong>{{ p.name }}</strong> <span class="chip">{{ p.short }}</span>{% if p.is_lead %} <span class="badge">ведущая</span>{% endif %}</td>
+          <td><strong>{{ p.name }}</strong>{% if p.short and p.short != p.name %} <span class="chip">{{ p.short }}</span>{% endif %}{% if p.is_lead %} <span class="badge">ведущая</span>{% endif %}</td>
           <td><div class="cell-score">{{ meta_badge(p.metascore) }}<span class="muted small">{% if p.critic_count %}{{ p.critic_count }} рец.{% else %}нет рецензий{% endif %}</span></div></td>
-          <td><div class="cell-score">{{ user_badge(p.userscore) }}<span class="muted small">{% if p.user_count %}{{ p.user_count|num }} {{ p.user_count|plural('оценка', 'оценки', 'оценок') }}{% else %}нет оценок{% endif %}</span></div></td>
+          <td><div class="cell-score">{{ user_badge(p.userscore) }}<span class="muted small">{% if p.user_count and p.userscore is none %}{{ p.user_count|num }} {{ p.user_count|plural('оценка', 'оценки', 'оценок') }}, мало для Userscore{% elif p.user_count %}{{ p.user_count|num }} {{ p.user_count|plural('оценка', 'оценки', 'оценок') }}{% else %}нет оценок{% endif %}</span></div></td>
           <td class="muted">{{ p.release_date|date_ru }}</td>
         </tr>
         {% endfor %}
@@ -61,7 +62,8 @@
     <div class="embed"><iframe src="{{ v.embed_url|url }}" title="{{ v.title or 'Трейлер' }}" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></div>
   </details>
   <p class="small muted video-source">Ссылка на видео: <a href="{{ v.url|url }}" target="_blank" rel="noopener noreferrer">{{ v.url }}</a>{% if v.manifest_url|url %} · <a href="{{ v.manifest_url|url }}" target="_blank" rel="noopener noreferrer">HLS</a>{% endif %}
-    {% if v.source == 'youtube' %}<br>На Metacritic у этой игры видео нет, поэтому показан самый подходящий трейлер с YouTube{% if v.channel %} (канал {{ v.channel }}{% if v.views %}, {{ v.views|num }} {{ v.views|plural('просмотр', 'просмотра', 'просмотров') }}{% endif %}){% endif %}.{% endif %}</p>
+    {% if v.source == 'youtube' and v.base_game %}<br>На Metacritic у этой игры видео нет, а у переиздания на YouTube не нашлось своего трейлера, поэтому показан трейлер оригинальной игры{% if v.channel %} (канал {{ v.channel }}{% if v.views %}, {{ v.views|num }} {{ v.views|plural('просмотр', 'просмотра', 'просмотров') }}{% endif %}){% endif %}.
+    {% elif v.source == 'youtube' %}<br>На Metacritic у этой игры видео нет, поэтому показан самый подходящий трейлер с YouTube{% if v.channel %} (канал {{ v.channel }}{% if v.views %}, {{ v.views|num }} {{ v.views|plural('просмотр', 'просмотра', 'просмотров') }}{% endif %}){% endif %}.{% endif %}</p>
   {% else %}
   <p class="small muted">Видео для этой игры нет ни на Metacritic, ни среди трейлеров на YouTube.</p>
   {% endif %}
@@ -99,7 +101,8 @@
 
 <section class="section card pad">
   {% set lp = g.letsplay %}
-  <h2>Летсплей на YouTube {% if lp %}{{ method_badge(lp.method) }}{% endif %}</h2>
+  {% set described = lp and lp.method in ('llm-description', 'description') %}
+  <h2>Летсплей на YouTube {% if lp %}{{ method_badge(lp.method) }}{% endif %}{% if described %} <span class="badge warn">речь блогера не расшифрована</span>{% endif %}</h2>
   {% if not lp %}
     <p class="muted">Поиск летсплея ещё не выполнялся.</p>
   {% elif not lp.video %}
@@ -116,16 +119,26 @@
         <p class="small muted video-sub">{{ v.channel or '' }} · {{ v.views|num }} {{ v.views|plural('просмотр', 'просмотра', 'просмотров') }}{% if v.length_seconds %} · {{ v.length_seconds|duration }}{% endif %}</p>
       </div>
       <div>
-        {% if lp.verdict %}<p class="verdict">{{ lp.verdict }}</p>{% endif %}
-        {% if lp.summary %}<p class="lp-summary">{{ lp.summary }}</p>{% endif %}
-        {% if lp.pros %}<h3>Понравилось блогеру</h3><ul class="points likes">{% for x in lp.pros %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
-        {% if lp.cons %}<h3>Не понравилось</h3><ul class="points dislikes">{% for x in lp.cons %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
-        {% if not lp.summary and not lp.pros and not lp.cons %}<p class="muted">{{ lp.note or 'Заключение построить не удалось.' }} Ссылка на ролик сохранена.</p>{% endif %}
+        {% if described %}
+          <h3 class="first">По описанию ролика</h3>
+          {% if lp.summary %}<p class="lp-summary">{{ lp.summary }}</p>{% endif %}
+          <p class="muted small">Ни субтитров, ни распознанной речи у подходящих роликов нет, поэтому мнение блогера здесь не приводится: выше только пересказ описания ролика.</p>
+        {% else %}
+          {% if lp.verdict %}<p class="verdict">{{ lp.verdict }}</p>{% endif %}
+          {% if lp.summary %}<p class="lp-summary">{{ lp.summary }}</p>{% endif %}
+          {% if lp.pros %}<h3>Понравилось блогеру</h3><ul class="points likes">{% for x in lp.pros %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
+          {% if lp.cons %}<h3>Не понравилось блогеру</h3><ul class="points dislikes">{% for x in lp.cons %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
+          {% if lp.evidence %}<h3>Слова блогера, на которых основано заключение</h3><ul class="quotes evidence">{% for x in lp.evidence %}<li>«{{ x }}»</li>{% endfor %}</ul>{% endif %}
+          {% if lp.llm_no_commentary %}<p class="small"><span class="badge warn">LLM не нашла в расшифровке оценок блогера, ниже фразы из неё; летсплей будет найден заново</span></p>{% endif %}
+          {% if not lp.summary and not lp.pros and not lp.cons %}<p class="muted">{{ lp.note or 'Заключение построить не удалось.' }} Ссылка на ролик сохранена.</p>{% endif %}
+        {% endif %}
         <div class="method">
-          {% if lp.status == 'ok' and lp.transcript_method == 'whisper' %}{% set st = lp.stt or {} %}{% if lp.checked %}Субтитры YouTube недоступны{% else %}Субтитры YouTube отключены настройкой{% endif %}, поэтому речь блогера распознана локально моделью Whisper ({{ st.model or 'base' }}, faster-whisper на CPU) по первым {{ ((st.audio_seconds or 0) / 60)|round|int }} мин аудио ролика: {{ lp.transcript_chars|num }} символов, язык: {{ lp.transcript_lang }}, распознавание заняло {{ (st.transcribe_seconds or 0)|round|int }} с.
-          {% elif lp.status == 'ok' %}Основано на расшифровке речи блогера из субтитров YouTube ({{ lp.transcript_chars|num }} символов, язык: {{ lp.transcript_lang }}).
+          {% if lp.status == 'ok' and lp.transcript_method == 'whisper' %}{% set st = lp.stt or {} %}{% if lp.checked %}Субтитров у ролика нет{% else %}Субтитры YouTube отключены настройкой{% endif %}, поэтому речь блогера распознана локально моделью Whisper ({{ st.model or 'base' }}, faster-whisper на CPU) по первым {{ ((st.audio_seconds or 0) / 60)|round|int }} мин аудио ролика: {{ lp.transcript_chars|num }} символов, язык: {{ lp.transcript_lang }}, распознавание заняло {{ (st.transcribe_seconds or 0)|round|int }} с.
+          {% elif lp.status == 'ok' %}Основано на субтитрах ролика на YouTube ({{ lp.transcript_chars|num }} символов, язык: {{ lp.transcript_lang }}).
           {% elif lp.note %}{{ lp.note }}.{% endif %}
-          {% set skipped = (lp.stt_checked or [])|selectattr('video_id', 'defined')|list %}{% if lp.transcript_method == 'whisper' and skipped %}Ролик выбран из поиска YouTube по просмотрам: это самый популярный подходящий ролик с речью блогера, более популярные ({{ skipped|length }}) пропущены, потому что речь в них распознать не удалось (нет комментариев или аудио недоступно).{% else %}Самый популярный подходящий ролик выбран из поиска YouTube по просмотрам.{% endif %} Обновлено {{ lp.updated_at|dt }}.
+          {% if lp.passed_over %}Это самый популярный подходящий ролик, в котором есть речь блогера. Более популярные пропущены:
+            {% for p in lp.passed_over %}«{{ p.title or p.video_id }}»{% if p.views %} ({{ p.views|num }} {{ p.views|plural('просмотр', 'просмотра', 'просмотров') }}){% endif %}: {{ p.reason }}{% if not loop.last %}; {% endif %}{% endfor %}.
+          {% else %}Это самый популярный подходящий ролик в поиске YouTube (сортировка по просмотрам).{% endif %} Обновлено {{ lp.updated_at|dt }}.
           {% if lp.last_error %}<br><span class="badge err">последняя проверка: {{ lp.last_error }}</span>{% endif %}
           {% if lp.error %}<br><span class="badge err">LLM: {{ lp.error }}</span>{% endif %}
         </div>
@@ -133,7 +146,7 @@
     </div>
     {% if lp.transcript_excerpt %}
     <details>
-      <summary>{% if lp.transcript_method == 'whisper' %}Фрагменты речи блогера, распознанной Whisper{% else %}Фрагменты расшифровки речи блогера{% endif %} (начало, середина, конец)</summary>
+      <summary>{% if lp.transcript_method == 'whisper' %}Фрагменты речи, распознанной Whisper{% else %}Фрагменты субтитров ролика{% endif %} (начало, середина, конец)</summary>
       <p class="small desc excerpt">{{ lp.transcript_excerpt }}</p>
     </details>
     {% endif %}
@@ -152,20 +165,13 @@
 
 <section class="section card pad">
   <h2>Похожие игры <span class="muted small">из тех, что уже есть в базе</span></h2>
-  {% if g.similar_games %}
-  <div class="similar">
-    {% for s in g.similar_games %}
-    <a href="/game/{{ s.slug|urlencode }}">
-      {{ cover(s.cover_url, s.title) }}
-      <span class="sim-title">{{ s.title }}</span>
-      <span class="chips">{{ meta_badge(s.metascore) }}{% for r in s.reasons[:2] %}<span class="chip">{{ r }}</span>{% endfor %}</span>
-    </a>
-    {% endfor %}
-  </div>
-  {% else %}
-  <p class="muted">Похожих игр в базе пока нет. Список пересчитывается после каждой обработки.</p>
-  {% endif %}
+  {% set strong = g.similar_games|rejectattr('weak')|list %}
+  {% set weak = g.similar_games|selectattr('weak')|list %}
+  {% if strong %}<div class="similar">{% for s in strong %}{{ similar_tile(s) }}{% endfor %}</div>{% endif %}
+  {% if weak %}<h3 class="sub-h">Ближе всего из базы (слабое сходство)</h3>
+  <div class="similar">{% for s in weak %}{{ similar_tile(s) }}{% endfor %}</div>{% endif %}
+  {% if not strong and not weak %}<p class="muted">Похожих игр в базе пока нет. Список пересчитывается после каждой обработки.</p>{% endif %}
 </section>
 
-<p class="small muted section">Первое появление в базе: {{ g.first_seen_at|dt }} · последнее обновление: {{ g.updated_at|dt }} · обработок: {{ g.times_processed }} · источник: {{ g.source }}</p>
+<p class="small muted section">Первое появление в базе: {{ g.first_seen_at|dt }} · последнее обновление: {{ g.updated_at|dt }} · обработок: {{ g.times_processed }} · источник: {{ g.source|source_ru }}</p>
 {% endblock %}

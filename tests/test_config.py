@@ -91,3 +91,41 @@ def test_speech_recognition_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("STT_MODEL", "  ")
     s = Settings()
     assert s.stt_max_minutes == 1 and s.stt_model == "base"
+
+
+def test_memory_limit_is_read_from_cgroup_files(tmp_path):
+    from app.config import memory_limit_bytes
+
+    v2 = tmp_path / "memory.max"
+    v1 = tmp_path / "memory.limit_in_bytes"
+    v2.write_text("1073741824\n")
+    assert memory_limit_bytes((str(v2), str(v1))) == 1073741824
+    v2.write_text("max\n")
+    assert memory_limit_bytes((str(v2), str(v1))) is None
+    v1.write_text("9223372036854771712\n")
+    assert memory_limit_bytes((str(tmp_path / "none"), str(v1))) is None
+    v1.write_text("2147483648")
+    assert memory_limit_bytes((str(tmp_path / "none"), str(v1))) == 2147483648
+    assert memory_limit_bytes((str(tmp_path / "none"),)) is None
+
+
+def test_whisper_plan_follows_the_memory_limit(settings, monkeypatch):
+    from app import main as main_mod
+    from app.db import Database
+    from app.monitor import Monitor
+
+    gb = 1024 ** 3
+    assert main_mod.stt_memory_plan(settings, None) == (True, None, "base")
+    assert main_mod.stt_memory_plan(settings, 4 * gb) == (True, None, "base")
+    on, note, model = main_mod.stt_memory_plan(settings, int(1.25 * gb))
+    assert on and model == "tiny" and "tiny" in note
+    settings.stt_model_explicit = True
+    assert main_mod.stt_memory_plan(settings, int(1.25 * gb))[2] == "base"
+    on, note, _ = main_mod.stt_memory_plan(settings, 1 * gb)
+    assert not on and "1,1 ГБ" in note
+
+    monkeypatch.setattr(main_mod, "memory_limit_bytes", lambda: 512 * 1024 ** 2)
+    mon = Monitor()
+    pipeline = main_mod.build_services(settings, Database(settings.db_path), mon)
+    worker = next(w for w in mon.snapshot()["workers"] if w["name"] == "stt")
+    assert pipeline.stt is None and worker["status"] == "off" and "памяти" in worker["detail"]

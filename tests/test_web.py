@@ -146,11 +146,41 @@ def test_youtube_trailer_is_shown_when_metacritic_has_no_video(settings):
 def test_page_bounds(settings):
     client, _, _ = client_with_data(settings)
     with client:
-        assert client.get("/", params={"page": 0}).status_code == 422
+        for bad in ("0", "abc", "-3", "99999999999"):
+            r = client.get("/", params={"page": bad})
+            assert r.status_code == 200 and 'class="current">1<' not in r.text and "over the hill" in r.text, bad
+        past = client.get("/", params={"page": 2}).text
+        assert "страницы 2 нет, показана 1 из 1" in past and "Ничего не найдено" not in past
+        assert "Найдено: 6 игр" in past
         assert client.get("/api/games", params={"page": 10**20}).status_code == 422
         assert client.get("/api/games", params={"page": 10000}).json()["items"] == []
         assert client.get("/api/games", params={"q": "x" * 201}).status_code == 422
-        assert client.get("/", params={"page": 2}).status_code == 200
+        r = client.get("/", params={"q": "x" * 201})
+        assert r.status_code == 422 and "Некорректный адрес страницы" in r.text and "← Все игры" in r.text
+
+
+def test_error_pages_are_html_for_people_and_json_for_the_api(settings):
+    client, pipeline, _ = client_with_data(settings)
+    with client:
+        r = client.get("/game/nope")
+        assert r.status_code == 404 and r.headers["content-type"].startswith("text/html")
+        assert "Игра не найдена" in r.text and 'href="/"' in r.text and "← Все игры" in r.text
+        r = client.get("/no/such/page")
+        assert r.status_code == 404 and "Страница не найдена" in r.text
+        r = client.get("/api/games/nope")
+        assert r.status_code == 404 and r.json() == {"detail": "Игра не найдена"}
+        assert client.get("/api/nothing").headers["content-type"].startswith("application/json")
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk on fire")
+
+    pipeline.db.get_game = boom
+    app = client.app
+    with TestClient(app, raise_server_exceptions=False) as broken:
+        r = broken.get("/game/over-the-hill")
+        assert r.status_code == 500 and "Что-то пошло не так" in r.text and "disk on fire" not in r.text
+        r = broken.get("/api/games/over-the-hill")
+        assert r.status_code == 500 and r.json() == {"detail": "Внутренняя ошибка сервера"}
 
 
 def test_monitor_status_and_live_stream(settings):
@@ -228,16 +258,24 @@ def test_cross_site_run_requests_are_refused(settings):
         wait_idle(pipeline)
 
 
-def test_run_token_protects_only_the_json_api(settings):
+def test_run_token_is_needed_everywhere_except_the_monitor_button(settings):
     settings.run_token = "s3cret"
     client, pipeline, _ = client_with_data(settings, run=False, batch=1)
     with client:
         assert client.post("/api/run").status_code == 401
         assert client.post("/api/run", headers={"Authorization": "Bearer wrong"}).status_code == 401
+        r = client.post("/run", headers={"Accept": "application/json"})
+        assert r.status_code == 401 and r.json()["code"] == "unauthorized"
+        r = client.post("/run", follow_redirects=False)
+        assert r.status_code == 303 and "forbidden=1" in r.headers["location"]
+        assert pipeline.db.last_run() is None
         r = client.post("/api/run?limit=1", headers={"Authorization": "Bearer s3cret"})
         assert r.status_code == 202
         wait_idle(pipeline)
-        r = client.post("/run", headers={"Accept": "application/json"})
+        r = client.post("/run", headers={"Accept": "application/json", "Sec-Fetch-Site": "same-origin"})
+        assert r.status_code == 202
+        wait_idle(pipeline)
+        r = client.post("/run", headers={"Accept": "application/json", "Authorization": "Bearer s3cret"})
         assert r.status_code == 202
         wait_idle(pipeline)
         assert client.get("/api/status").json()["manual"]["token_required_for_api"] is True
@@ -313,14 +351,18 @@ def test_card_says_when_the_text_comes_from_whisper(settings):
     with client:
         html = client.get("/game/over-the-hill").text
         assert "LLM по речи, распознанной Whisper" in html
-        assert "Субтитры YouTube недоступны, поэтому речь блогера распознана локально моделью Whisper (base" in html
-        assert "по первым 1 мин аудио" in html and "Фрагменты речи блогера, распознанной Whisper" in html
+        assert "Субтитров у ролика нет, поэтому речь блогера распознана локально моделью Whisper (base" in html
+        assert "по первым 1 мин аудио" in html and "Фрагменты речи, распознанной Whisper" in html
+        assert "Это самый популярный подходящий ролик в поиске YouTube" in html
+        assert "Слова блогера, на которых основано заключение" in html
         lp = client.get("/api/games/over-the-hill").json()["letsplay"]
         assert lp["transcript_method"] == "whisper" and lp["stt"]["model"] == "base"
-        lp["stt_checked"] = [{"video_id": "oiVbvxSoNZI", "reason": "в аудио почти нет речи"}, {"reason": "лимит"}]
+        lp["passed_over"] = [{"video_id": "oiVbvxSoNZI", "title": "Big Video", "views": 2050,
+                              "reason": "в ролике нет комментариев блогера"}]
         pipeline.db.set_json(pipeline.db.get_game(slug="over-the-hill")["id"], "letsplay", lp)
-        assert "более популярные (1) пропущены, потому что речь в них распознать не удалось" in client.get(
-            "/game/over-the-hill").text
+        html = client.get("/game/over-the-hill").text
+        assert "Более популярные пропущены:" in html
+        assert "«Big Video» (2 050 просмотров): в ролике нет комментариев блогера" in html
 
 
 def test_monitor_shows_the_speech_worker_state(settings, monkeypatch):
@@ -335,3 +377,98 @@ def test_monitor_shows_the_speech_worker_state(settings, monkeypatch):
     assert build_services(settings, db, off).stt is None
     worker = next(w for w in off.snapshot()["workers"] if w["name"] == "stt")
     assert worker["status"] == "off" and "STT_ENABLED=0" in worker["detail"]
+
+
+def test_description_based_letsplay_is_not_presented_as_the_bloggers_opinion(settings):
+    client, pipeline, _ = client_with_data(settings, batch=1, yt=FakeYouTube(transcript_ok=False))
+    with client:
+        html = client.get("/game/over-the-hill").text
+        assert "По описанию ролика" in html and "речь блогера не расшифрована" in html
+        assert "Понравилось блогеру" not in html and "Не понравилось блогеру" not in html
+        lp = client.get("/api/games/over-the-hill").json()["letsplay"]
+        lp.update(pros=["выдуманный плюс"], cons=["выдуманный минус"])
+        pipeline.db.set_json(pipeline.db.get_game(slug="over-the-hill")["id"], "letsplay", lp)
+        html = client.get("/game/over-the-hill").text
+        assert "выдуманный плюс" not in html and "выдуманный минус" not in html
+
+
+def test_monitor_shows_sources_durations_and_hides_internal_fields(settings):
+    client, pipeline, clock = client_with_data(settings, batch=3)
+    with client:
+        html = client.get("/monitor").text
+        assert "<th>Источник</th>" in html and "<th>Длительность</th>" in html
+        assert "New Releases" in html and "new-releases" not in html.replace('data-', '')
+        assert "сегодня ещё не пройден блок New Releases" in html
+        st = client.get("/api/status").json()
+        assert "owner" not in st["last_run"] and all("owner" not in r for r in st["runs"])
+        assert st["last_run"]["source_label"] == "New Releases" and st["last_run"]["seconds"] == 0
+        runs = client.get("/api/runs").json()
+        assert runs and "owner" not in runs[0] and "heartbeat_at" not in runs[0]
+        pipeline.db.add_error(1, st["day"], "x", "youtube:schema", "boom")
+        client.app.state.status_cache.invalidate()
+        st = client.get("/api/status").json()
+        assert st["errors"][0]["step_label"] == "YouTube: поиск летсплея (формат ответа изменился)"
+        pipeline.db.save_day_state(type(pipeline.db.get_day_state("d"))(st["day"], True, 48))
+        assert "дальше SEE ALL со страницы 3" in client.get("/monitor").text
+
+
+def test_source_and_step_labels():
+    from app.main import fmt_wait, source_label, step_label
+
+    assert source_label("new-releases, browse:p2") == "New Releases, SEE ALL, стр. 2"
+    assert source_label("retry, browse:p1") == "повтор упавших, SEE ALL, стр. 1"
+    assert source_label("") == "—"
+    assert step_label("selection:schema") == "Список игр Metacritic (формат ответа изменился)"
+    assert step_label("Metacritic: карточка и оценки") == "Metacritic: карточка и оценки"
+    assert fmt_wait(299) == "4:59" and fmt_wait(3600 * 22 + 61) == "22:01:01"
+
+
+def test_cooldown_hint_counts_down_instead_of_freezing(settings):
+    settings.manual_cooldown_seconds = 300
+    client, pipeline, clock = client_with_data(settings, batch=1)
+    with client:
+        html = client.get("/monitor").text
+        assert "Можно запустить через 5:00." in html
+        st = client.get("/api/status").json()["manual"]
+        assert st["code"] == "cooldown" and "5:00" not in st["reason"] and "через" not in st["reason"]
+
+
+def test_empty_states_follow_the_scheduler_setting(settings):
+    settings.scheduler_enabled = False
+    client, _, _ = client_with_data(settings, run=False)
+    with client:
+        html = client.get("/").text
+        assert "Автозапуск выключен" in html and "запускается автоматически" not in html
+        mon = client.get("/monitor").text
+        assert "Автозапуск выключен (SCHEDULER_ENABLED=0)" in mon
+        assert "сегодня первым будет обработан блок New Releases" in mon
+        assert "запусков ещё не было" in mon
+        assert "с момента старта сервиса запросов не было" in mon
+
+
+def test_similar_games_show_weak_matches_separately(settings):
+    client, pipeline, _ = client_with_data(settings)
+    db = pipeline.db
+    games = client.get("/api/games").json()["items"]
+    first, second, third = games[0], games[1], games[2]
+    db.set_similar_bulk({first["id"]: [{"id": second["id"], "score": 0.4, "reasons": ["общий жанр"]},
+                                       {"id": third["id"], "score": 0.05, "reasons": ["близкий жанр"],
+                                        "weak": True}]})
+    with client:
+        html = client.get(f"/game/{first['slug']}").text
+        strong_at = html.index(f'href="/game/{second["slug"]}"')
+        weak_at = html.index(f'href="/game/{third["slug"]}"')
+        assert strong_at < html.index("Ближе всего из базы (слабое сходство)") < weak_at
+        data = client.get(f"/api/games/{first['slug']}").json()["similar_games"]
+        assert [s["weak"] for s in data] == [False, True]
+
+
+def test_event_stream_ends_after_its_lifetime(settings, monkeypatch):
+    from app import main as main_mod
+
+    monkeypatch.setattr(main_mod, "SSE_MAX_SECONDS", 0)
+    client, _, _ = client_with_data(settings, run=False)
+    with client:
+        with client.stream("GET", "/api/events") as resp:
+            body = "".join(resp.iter_text())
+        assert resp.status_code == 200 and body == ""

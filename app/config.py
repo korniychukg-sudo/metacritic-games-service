@@ -13,10 +13,10 @@ def _int(name: str, default: int, minimum: int | None = None, maximum: int | Non
     except (TypeError, ValueError):
         value = default
     if minimum is not None and value < minimum:
-        log.warning("%s=%s is below the minimum, using %s", name, value, minimum)
+        log.warning("%s=%s меньше минимума, используется %s", name, value, minimum)
         value = minimum
     if maximum is not None and value > maximum:
-        log.warning("%s=%s is above the maximum, using %s", name, value, maximum)
+        log.warning("%s=%s больше максимума, используется %s", name, value, maximum)
         value = maximum
     return value
 
@@ -49,9 +49,9 @@ def resolve_tz(name: str) -> tzinfo:
         return ZoneInfo(name)
     except Exception as exc:
         if name in {"Europe/Moscow", "MSK"}:
-            log.warning("Time zone %r is unavailable (%s), using fixed UTC+3", name, exc.__class__.__name__)
+            log.warning("Часовой пояс %r недоступен (%s), используется UTC+3", name, exc.__class__.__name__)
             return MSK
-        log.warning("Unknown time zone %r (%s), falling back to UTC", name, exc.__class__.__name__)
+        log.warning("Неизвестный часовой пояс %r (%s), используется UTC", name, exc.__class__.__name__)
         return timezone.utc
 
 
@@ -112,6 +112,7 @@ class Settings:
 
     stt_enabled: bool = field(default_factory=lambda: _bool("STT_ENABLED", True))
     stt_model: str = field(default_factory=lambda: os.environ.get("STT_MODEL", "").strip() or "base")
+    stt_model_explicit: bool = field(default_factory=lambda: bool(os.environ.get("STT_MODEL", "").strip()))
     stt_max_minutes: int = field(default_factory=lambda: _int("STT_MAX_MINUTES", 15, 1, 60))
     stt_max_per_run: int = field(default_factory=lambda: _int("STT_MAX_PER_RUN", 6, 1, 50))
     stt_timeout_seconds: int = field(default_factory=lambda: _int("STT_TIMEOUT_SECONDS", 300, 30, 3600))
@@ -149,6 +150,22 @@ class Settings:
         local = now.astimezone(self.day_tz)
         start = datetime(local.year, local.month, local.day, tzinfo=self.day_tz) + timedelta(days=1)
         return start.astimezone(timezone.utc)
+
+
+CGROUP_LIMIT_FILES = ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes")
+
+
+def memory_limit_bytes(paths: tuple[str, ...] = CGROUP_LIMIT_FILES) -> int | None:
+    for path in paths:
+        try:
+            with open(path, encoding="ascii") as fh:
+                raw = fh.read().strip()
+        except OSError:
+            continue
+        if raw.isdigit() and int(raw) < 1 << 60:
+            return int(raw)
+        return None
+    return None
 
 
 def utcnow() -> datetime:

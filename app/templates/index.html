@@ -5,7 +5,7 @@
 <div class="page-head">
   <div>
     <h1>Новые игры с Metacritic</h1>
-    <p class="muted">В базе {{ games_in_db }} {{ games_in_db|plural('игра', 'игры', 'игр') }}. Сервис раз в {{ interval_label }} забирает до {{ batch_size }} новых игр и обновляет уже известные.</p>
+    <p class="muted">В базе {{ games_in_db }} {{ games_in_db|plural('игра', 'игры', 'игр') }}. {% if scheduler_enabled %}Сервис раз в {{ interval_label }} забирает до {{ batch_size }} новых игр и обновляет уже известные.{% else %}Автозапуск выключен, обработка запускается кнопкой на странице мониторинга.{% endif %}</p>
   </div>
   <a class="btn ghost" href="/monitor">Мониторинг{% if running %} · идёт обработка{% endif %}</a>
 </div>
@@ -27,7 +27,7 @@
 </form>
 
 <div class="filter-meta">
-  <span class="muted small">Найдено: {{ total }}{% if platform %} · оценки показаны для платформы {{ platform }}{% endif %}</span>
+  <span class="muted small">Найдено: {{ total }} {{ total|plural('игра', 'игры', 'игр') }}{% if platform %} · оценки показаны для платформы {{ platform }}{% endif %}{% if requested_page > pages %} · страницы {{ requested_page }} нет, показана {{ page }} из {{ pages }}{% endif %}</span>
   {% if q or platform or sort != 'date_desc' %}<a class="small" href="/">Сбросить фильтры</a>{% endif %}
 </div>
 
@@ -66,7 +66,11 @@
 <div class="card empty">
   {% if games_in_db == 0 %}
   <h2>Игр пока нет</h2>
+  {% if scheduler_enabled %}
   <p class="muted">Первая обработка запускается автоматически вскоре после старта сервиса. Её ход видно на странице мониторинга, там же можно запустить обработку вручную.</p>
+  {% else %}
+  <p class="muted">Автозапуск выключен (SCHEDULER_ENABLED=0). Запустите обработку кнопкой на странице мониторинга.</p>
+  {% endif %}
   <a class="btn" href="/monitor">Открыть мониторинг</a>
   {% else %}
   <h2>Ничего не найдено</h2>
