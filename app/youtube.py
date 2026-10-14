@@ -3,8 +3,9 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
-from .http_client import PoliteClient
+from .http_client import PoliteClient, SchemaError
 
 log = logging.getLogger("youtube")
 
@@ -12,6 +13,18 @@ SEARCH_URL = "https://www.youtube.com/results"
 WATCH_URL = "https://www.youtube.com/watch"
 CONSENT_COOKIES = {"SOCS": "CAI", "CONSENT": "YES+cb"}
 SP_POPULAR_LONG = "CAMSAhgC"
+VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+TRAILER = re.compile(r"\b(trailer|трейлер|teaser|тизер)\b", re.I)
+OFFICIAL = re.compile(r"\b(official|официальный)\b", re.I)
+BLOCK_MARKERS = (
+    ("consent.youtube.com", "YouTube вернул страницу согласия на cookies"),
+    ("Sign in to confirm you", "YouTube просит подтвердить, что запрос не от бота"),
+    ("g-recaptcha", "YouTube показал капчу"),
+)
+
+
+class YouTubeBlocked(SchemaError):
+    pass
 
 EXCLUDE = re.compile(r"\b(trailer|review|reviews|teaser|reveal|announcement|preview|обзор|трейлер|news|reaction)\b", re.I)
 PREFER = re.compile(
@@ -160,15 +173,25 @@ def iter_video_renderers(node):
             stack.extend(reversed(cur))
 
 
+def detect_block(html_text: str) -> str | None:
+    for marker, reason in BLOCK_MARKERS:
+        if marker in html_text:
+            return reason
+    return None
+
+
 def parse_search_html(html_text: str) -> list[VideoCandidate]:
     data = extract_initial_data(html_text)
-    if not data:
-        return []
+    if data is None:
+        reason = detect_block(html_text)
+        if reason:
+            raise YouTubeBlocked(reason)
+        raise SchemaError("на странице поиска YouTube нет ytInitialData (сменился формат страницы)")
     out: list[VideoCandidate] = []
     seen = set()
     for vr in iter_video_renderers(data):
         vid = vr.get("videoId")
-        if not vid or vid in seen:
+        if not isinstance(vid, str) or not VIDEO_ID.match(vid) or vid in seen:
             continue
         seen.add(vid)
         view_obj = vr.get("viewCountText") or {}
@@ -227,6 +250,21 @@ def rank_candidates(game_title: str, candidates: list[VideoCandidate],
     return sorted(eligible, key=lambda c: (not bool(PREFER.search(c.title)), -(c.views or 0)))
 
 
+def rank_trailers(game_title: str, candidates: list[VideoCandidate], max_seconds: int = 600) -> list[VideoCandidate]:
+    eligible = []
+    for c in candidates:
+        if c.live or c.views is None:
+            continue
+        if c.length_seconds is None or not 20 <= c.length_seconds <= max_seconds:
+            continue
+        if not TRAILER.search(c.title) or re.search(r"\breaction\b|реакция", c.title, re.I):
+            continue
+        if not title_matches(game_title, c.title):
+            continue
+        eligible.append(c)
+    return sorted(eligible, key=lambda c: (not bool(OFFICIAL.search(c.title)), -(c.views or 0)))
+
+
 def merge_candidates(lists: list[tuple[str, list[VideoCandidate]]]) -> list[VideoCandidate]:
     merged: dict[str, VideoCandidate] = {}
     for query, items in lists:
@@ -239,7 +277,7 @@ def merge_candidates(lists: list[tuple[str, list[VideoCandidate]]]) -> list[Vide
     return list(merged.values())
 
 
-NOISE = re.compile(r"\[(?:music|applause|laughter|музыка|аплодисменты|смех|__)\]|♪+", re.I)
+NOISE = re.compile(r"\[(?:music|applause|laughter|музыка|аплодисменты|смех|__)\]|♪+|>>", re.I)
 
 
 def transcript_to_text(snippets: list[dict]) -> str:
@@ -274,13 +312,13 @@ class YouTubeClient:
         self.proxy_url = proxy_url
         self._api = None
 
-    def search(self, query: str) -> list[VideoCandidate]:
-        resp = self.http.get(
-            SEARCH_URL,
-            params={"search_query": query, "sp": SP_POPULAR_LONG, "hl": "en", "gl": "US"},
-            cookies=CONSENT_COOKIES,
-            headers={"Accept": "text/html"},
-        )
+    def search(self, query: str, sp: str | None = SP_POPULAR_LONG) -> list[VideoCandidate]:
+        params = {"search_query": query, "hl": "en", "gl": "US"}
+        if sp:
+            params["sp"] = sp
+        resp = self.http.get(SEARCH_URL, params=params, cookies=CONSENT_COOKIES, headers={"Accept": "text/html"})
+        if urlparse(str(resp.url)).hostname == "consent.youtube.com":
+            raise YouTubeBlocked("YouTube перенаправил на страницу согласия на cookies")
         return parse_search_html(resp.text)
 
     def watch_details(self, video_id: str) -> dict | None:
@@ -290,24 +328,42 @@ class YouTubeClient:
 
     def find_letsplays(self, game_title: str) -> list[VideoCandidate]:
         results = []
+        last_exc: Exception | None = None
         for query in (f"{game_title} let's play", f"{game_title} прохождение"):
             try:
                 results.append((query, self.search(query)))
             except Exception as exc:
+                last_exc = exc
                 log.warning("YouTube search failed for %r: %s", query, exc)
+        if not results and last_exc is not None:
+            raise last_exc
         return rank_candidates(game_title, merge_candidates(results))
+
+    def find_trailer(self, game_title: str) -> VideoCandidate | None:
+        ranked = rank_trailers(game_title, self.search(f"{game_title} official trailer", sp=None))
+        return ranked[0] if ranked else None
 
     def _transcript_api(self):
         if self._api is None:
             import requests
             from youtube_transcript_api import YouTubeTranscriptApi
 
-            class TimeoutSession(requests.Session):
-                def request(self, *args, **kw):
-                    kw.setdefault("timeout", 30)
-                    return super().request(*args, **kw)
+            http = self.http
 
-            session = TimeoutSession()
+            class PoliteSession(requests.Session):
+                def request(self, method, url, *args, **kw):
+                    kw.setdefault("timeout", 30)
+                    host = urlparse(str(url)).netloc
+                    http.limiter.wait(host)
+                    try:
+                        resp = super().request(method, url, *args, **kw)
+                    except requests.RequestException:
+                        http.report(host, False)
+                        raise
+                    http.report(host, resp.status_code < 400)
+                    return resp
+
+            session = PoliteSession()
             session.headers.update({"User-Agent": self.http.client.headers.get("User-Agent", ""),
                                     "Accept-Language": "en-US,en;q=0.9"})
             kwargs = {"http_client": session}
@@ -319,15 +375,15 @@ class YouTubeClient:
         return self._api
 
     def transcript(self, video_id: str) -> tuple[str, str]:
+        if not VIDEO_ID.match(video_id or ""):
+            raise TranscriptUnavailable("некорректный id ролика")
         api = self._transcript_api()
         try:
-            self.http.limiter.wait("www.youtube.com")
             listing = api.list(video_id)
             try:
                 tr = listing.find_transcript(["en", "ru"])
             except Exception:
                 tr = next(iter(listing))
-            self.http.limiter.wait("www.youtube.com")
             raw = tr.fetch().to_raw_data()
         except StopIteration:
             raise TranscriptUnavailable("нет ни одной дорожки субтитров")

@@ -3,8 +3,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
-from .http_client import NotFound, PoliteClient
+from .http_client import NotFound, PoliteClient, SchemaError
 
 log = logging.getLogger("metacritic")
 
@@ -40,10 +41,30 @@ def platform_slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
+VIDEO_HOSTS = frozenset({"cdn.jwplayer.com"})
+
+
 def cover_url(bucket_path: str | None) -> str | None:
-    if not bucket_path:
+    if not isinstance(bucket_path, str) or not bucket_path.startswith("/") or bucket_path.startswith("//"):
+        return None
+    if any(ch in bucket_path for ch in "\"'<> \\"):
         return None
     return IMG_PREFIX + bucket_path
+
+
+def safe_url(url: Any, hosts: frozenset[str] | None = None, schemes: tuple[str, ...] = ("https",)) -> str | None:
+    if not isinstance(url, str):
+        return None
+    url = url.strip()
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    if parsed.scheme not in schemes or not parsed.hostname:
+        return None
+    if hosts is not None and parsed.hostname not in hosts:
+        return None
+    return url
 
 
 @dataclass
@@ -113,6 +134,9 @@ class GameDetails:
     lead_user_count: int | None = None
     critic_negative_count: int = 0
     user_negative_count: int = 0
+    critic_reviews_known: bool = True
+    user_reviews_known: bool = True
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def metascore(self) -> int | None:
@@ -145,11 +169,17 @@ def _float_or_none(v: Any) -> float | None:
         return None
 
 
-def parse_list(payload: dict) -> tuple[list[ListItem], int]:
-    data = (payload or {}).get("data") or {}
+def parse_list(payload: dict, offset: int = 0) -> tuple[list[ListItem], int]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise SchemaError("в ответе списка игр Metacritic нет объекта data")
+    raw_items = data.get("items")
+    if not isinstance(raw_items, list):
+        raise SchemaError("в ответе списка игр Metacritic нет массива data.items")
+    total = _int_or_none(data.get("totalResults"))
     items = []
-    for raw in data.get("items") or []:
-        if not raw or raw.get("id") is None or not raw.get("slug"):
+    for raw in raw_items:
+        if not isinstance(raw, dict) or raw.get("id") is None or not raw.get("slug"):
             continue
         plats = raw.get("platforms") or []
         items.append(
@@ -164,7 +194,11 @@ def parse_list(payload: dict) -> tuple[list[ListItem], int]:
                 genres=[g.get("name") for g in raw.get("genres") or [] if g.get("name")],
             )
         )
-    return items, int(data.get("totalResults") or 0)
+    if raw_items and not items:
+        raise SchemaError("у элементов списка игр Metacritic нет полей id и slug")
+    if not raw_items and total and offset < total:
+        raise SchemaError(f"список игр Metacritic пуст, хотя totalResults={total}")
+    return items, total or 0
 
 
 def components_by_name(payload: dict) -> dict[str, dict]:
@@ -193,11 +227,13 @@ def _pick_image(images: list[dict], *types: str) -> str | None:
     return None
 
 
-def parse_reviews(summary_component: dict | None, kind: str) -> tuple[list[Review], int]:
-    if not summary_component or "data" not in summary_component:
-        return [], 0
-    data = summary_component.get("data") or {}
-    item = data.get("item") or {}
+def parse_reviews(summary_component: dict | None, kind: str) -> tuple[list[Review], int, bool]:
+    if not summary_component or not isinstance(summary_component.get("data"), dict):
+        return [], 0, False
+    data = summary_component["data"]
+    item = data.get("item")
+    if not isinstance(item, dict) or not any(k in item for k in ("positive", "neutral", "negative", "default")):
+        return [], _int_or_none(data.get("totalResults")) or 0, False
     seen: set[str] = set()
     out: list[Review] = []
     for sentiment in ("positive", "neutral", "negative", "default"):
@@ -206,7 +242,7 @@ def parse_reviews(summary_component: dict | None, kind: str) -> tuple[list[Revie
             if rev and rev.quote not in seen:
                 seen.add(rev.quote)
                 out.append(rev)
-    return out, int(data.get("totalResults") or 0)
+    return out, _int_or_none(data.get("totalResults")) or 0, True
 
 
 def sentiment_for(kind: str, score: float | None) -> str:
@@ -234,7 +270,7 @@ def _review_from_raw(r: dict, kind: str, sentiment: str | None) -> Review | None
         quote=quote,
         score=score,
         author=author or None,
-        url=r.get("url") if kind == "critic" else None,
+        url=safe_url(r.get("url"), schemes=("https", "http")) if kind == "critic" else None,
         date=r.get("date"),
         platform=r.get("platform"),
     )
@@ -259,14 +295,28 @@ def parse_user_stats(payload: dict) -> tuple[float | None, int | None]:
     return score, count
 
 
+def _not_found_errors(payload: Any) -> bool:
+    errors = payload.get("errors") if isinstance(payload, dict) else None
+    return bool(errors) and any(isinstance(e, dict) and e.get("code") == 404 for e in errors)
+
+
 def parse_composer(payload: dict) -> GameDetails:
+    if _not_found_errors(payload):
+        raise NotFound("game not found")
     comps = components_by_name(payload)
     product = comps.get("product")
-    if not product or "data" not in product:
-        raise NotFound("product component missing")
-    item = product["data"].get("item") or {}
+    if not product:
+        raise SchemaError("в ответе карточки Metacritic нет компонента product")
+    if _not_found_errors(product):
+        raise NotFound("game not found")
+    item = (product.get("data") or {}).get("item") if isinstance(product.get("data"), dict) else None
+    if not isinstance(item, dict) or item.get("id") is None or not item.get("slug"):
+        raise SchemaError("в компоненте product нет id или slug игры")
+    warnings: list[str] = []
+    if not isinstance(item.get("platforms"), list) or not item.get("platforms"):
+        warnings.append("в карточке нет списка платформ")
     companies = (item.get("production") or {}).get("companies") or []
-    video = item.get("video") or {}
+    video = item.get("video") if isinstance(item.get("video"), dict) else {}
     lead_name = item.get("platform")
 
     platforms: list[PlatformInfo] = []
@@ -302,8 +352,12 @@ def parse_composer(payload: dict) -> GameDetails:
             if p.is_lead:
                 p.userscore, p.user_count = lead_userscore, lead_user_count
 
-    critic_reviews, critic_total = parse_reviews(comps.get("critic-reviews"), "critic")
-    user_reviews, user_total = parse_reviews(comps.get("user-reviews"), "user")
+    critic_reviews, critic_total, critic_known = parse_reviews(comps.get("critic-reviews"), "critic")
+    user_reviews, user_total, user_known = parse_reviews(comps.get("user-reviews"), "user")
+    if not critic_known:
+        warnings.append("в карточке нет блока отзывов критиков")
+    if not user_known:
+        warnings.append("в карточке нет блока отзывов игроков")
 
     return GameDetails(
         id=int(item.get("id")),
@@ -318,8 +372,8 @@ def parse_composer(payload: dict) -> GameDetails:
         franchises=[f["name"] for f in (item.get("gameTaxonomy") or {}).get("franchises") or [] if f.get("name")],
         cover_url=_pick_image(item.get("images"), "cardImage", "mainImage"),
         hero_url=_pick_image(item.get("images"), "mainImage", "cardImage"),
-        video_embed_url=video.get("embedUrl"),
-        video_manifest_url=video.get("manifestUrl"),
+        video_embed_url=safe_url(video.get("embedUrl"), VIDEO_HOSTS),
+        video_manifest_url=safe_url(video.get("manifestUrl"), VIDEO_HOSTS),
         video_title=clean_text(video.get("title") or video.get("videoTitle")),
         lead_platform=lead_name or next((p.name for p in platforms if p.is_lead), None),
         platforms=platforms,
@@ -331,6 +385,9 @@ def parse_composer(payload: dict) -> GameDetails:
         lead_user_count=lead_user_count,
         critic_negative_count=critic_negative,
         user_negative_count=user_negative,
+        critic_reviews_known=critic_known,
+        user_reviews_known=user_known,
+        warnings=warnings,
     )
 
 
@@ -356,14 +413,14 @@ class MetacriticClient:
                 "mcoTypeId": 13,
             },
         )
-        return parse_list(payload)[0]
+        return parse_list(payload, 0)[0]
 
     def browse_new(self, offset: int, limit: int = 24) -> list[ListItem]:
         payload = self._json(
             "/finder/metacritic/web",
             {"sortBy": "-releaseDate", "productType": "games", "offset": offset, "limit": limit, "mcoTypeId": 13},
         )
-        return parse_list(payload)[0]
+        return parse_list(payload, offset)[0]
 
     def game(self, slug: str) -> GameDetails:
         return parse_composer(self._json(f"/composer/metacritic/pages/games/{slug}/web"))

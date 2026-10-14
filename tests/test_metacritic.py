@@ -1,5 +1,8 @@
+import copy
+
 import pytest
 
+from app.http_client import NotFound, SchemaError
 from app.metacritic import (
     MetacriticClient,
     cover_url,
@@ -9,10 +12,10 @@ from app.metacritic import (
     parse_reviews,
     parse_user_stats,
     platform_short,
+    safe_url,
 )
-from app.http_client import NotFound
 
-from .conftest import load_json
+from .conftest import load_json, product_item
 
 
 def test_new_releases_list():
@@ -65,8 +68,10 @@ def test_user_stats_zero_means_no_score():
 
 
 def test_empty_review_summary():
-    reviews, total = parse_reviews(load_json("critic_summary_niph.json"), "critic")
-    assert reviews == [] and total == 0
+    reviews, total, known = parse_reviews(load_json("critic_summary_niph.json"), "critic")
+    assert reviews == [] and total == 0 and known is True
+    assert parse_reviews(None, "critic") == ([], 0, False)
+    assert parse_reviews({"data": {"totalResults": 5}}, "user") == ([], 5, False)
 
 
 def test_review_list_sentiment_from_score():
@@ -131,3 +136,73 @@ def test_unknown_slug_raises_not_found():
         MetacriticClient(http).game("this-slug-does-not-exist-xyz")
     with pytest.raises(NotFound):
         parse_composer(load_json("product_404.json"))
+
+
+def test_list_schema_drift_raises_instead_of_returning_nothing():
+    good = load_json("finder_browse_new_p1.json")
+    renamed = copy.deepcopy(good)
+    renamed["data"]["results"] = renamed["data"].pop("items")
+    with pytest.raises(SchemaError):
+        parse_list(renamed)
+    with pytest.raises(SchemaError):
+        parse_list({"meta": {}})
+    with pytest.raises(SchemaError):
+        parse_list([])
+    empty_but_total = copy.deepcopy(good)
+    empty_but_total["data"]["items"] = []
+    with pytest.raises(SchemaError):
+        parse_list(empty_but_total, offset=0)
+    items, total = parse_list(empty_but_total, offset=total_of(good) + 24)
+    assert items == [] and total == total_of(good)
+    no_ids = copy.deepcopy(good)
+    for it in no_ids["data"]["items"]:
+        it.pop("id")
+    with pytest.raises(SchemaError):
+        parse_list(no_ids)
+
+
+def total_of(payload):
+    return payload["data"]["totalResults"]
+
+
+def test_composer_schema_drift():
+    good = load_json("composer_game_star-wars-galactic-racer.json")
+    no_product = copy.deepcopy(good)
+    no_product["components"] = [c for c in no_product["components"] if c["meta"]["componentName"] != "product"]
+    with pytest.raises(SchemaError):
+        parse_composer(no_product)
+    with pytest.raises(SchemaError):
+        parse_composer({"components": []})
+    no_id = copy.deepcopy(good)
+    product_item(no_id).pop("id")
+    with pytest.raises(SchemaError):
+        parse_composer(no_id)
+    partial = copy.deepcopy(good)
+    product_item(partial).pop("platforms")
+    partial["components"] = [c for c in partial["components"] if c["meta"]["componentName"] != "critic-reviews"]
+    g = parse_composer(partial)
+    assert g.platforms == [] and g.critic_reviews == [] and g.critic_reviews_known is False
+    assert g.user_reviews_known is True
+    assert any("платформ" in w for w in g.warnings) and any("критиков" in w for w in g.warnings)
+    assert parse_composer(good).warnings == []
+
+
+def test_unsafe_urls_are_dropped_by_the_parser():
+    payload = load_json("composer_game_star-wars-galactic-racer.json")
+    item = product_item(payload)
+    item["video"]["embedUrl"] = "javascript:alert(document.domain)"
+    item["video"]["manifestUrl"] = "https://evil.example/x.m3u8"
+    for comp in payload["components"]:
+        if comp["meta"]["componentName"] == "critic-reviews":
+            for r in comp["data"]["item"]["positive"]:
+                r["url"] = "javascript:alert(1)"
+    g = parse_composer(payload)
+    assert g.video_embed_url is None and g.video_manifest_url is None
+    assert all(r.url is None or r.url.startswith(("https://", "http://")) for r in g.critic_reviews)
+    assert any(r.url is None for r in g.critic_reviews if r.sentiment == "positive")
+    assert safe_url("https://cdn.jwplayer.com/players/x.html", frozenset({"cdn.jwplayer.com"}))
+    assert safe_url("https://cdn.jwplayer.com.evil.example/x", frozenset({"cdn.jwplayer.com"})) is None
+    assert safe_url("http://site.example/review", schemes=("https", "http"))
+    assert safe_url("data:text/html,hi") is None and safe_url(None) is None
+    assert cover_url("/provider/7/2/a.jpg").startswith("https://www.metacritic.com/a/img/catalog/")
+    assert cover_url("//evil.example/a.jpg") is None and cover_url('/a" onerror="x') is None

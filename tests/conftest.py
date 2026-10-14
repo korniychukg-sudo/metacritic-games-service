@@ -1,7 +1,7 @@
 import copy
 import json
-import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -12,9 +12,17 @@ sys.path.insert(0, str(ROOT))
 
 from app.config import Settings  # noqa: E402
 from app.db import Database  # noqa: E402
-from app.llm import LLMError  # noqa: E402
+from app.llm import LLMError, LLMSkipped  # noqa: E402
 from app.metacritic import ListItem, parse_composer, parse_list  # noqa: E402
-from app.youtube import VideoCandidate, parse_search_html, parse_watch_html, rank_candidates, transcript_to_text  # noqa: E402
+from app.youtube import (  # noqa: E402
+    TranscriptUnavailable,
+    VideoCandidate,
+    YouTubeBlocked,
+    parse_search_html,
+    parse_watch_html,
+    rank_candidates,
+    transcript_to_text,
+)
 
 
 def load_json(name: str):
@@ -23,6 +31,18 @@ def load_json(name: str):
 
 def load_text(name: str) -> str:
     return (SAMPLES / name).read_text(encoding="utf-8")
+
+
+class FakeClock:
+    def __init__(self, start: datetime | None = None):
+        self.now = start or datetime(2026, 10, 14, 9, 0, tzinfo=timezone.utc)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, **kw) -> datetime:
+        self.now += timedelta(**kw)
+        return self.now
 
 
 @pytest.fixture
@@ -34,6 +54,7 @@ def samples():
 def settings(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "games.db"))
     monkeypatch.setenv("SCHEDULER_ENABLED", "0")
+    monkeypatch.setenv("MANUAL_RUN_COOLDOWN_SECONDS", "0")
     s = Settings()
     s.llm_min_gap = 0
     return s
@@ -44,32 +65,49 @@ def db(settings):
     return Database(settings.db_path)
 
 
+@pytest.fixture
+def clock():
+    return FakeClock()
+
+
+def product_item(payload: dict) -> dict:
+    return next(c for c in payload["components"] if c["meta"].get("componentName") == "product")["data"]["item"]
+
+
 class FakeMetacritic:
-    def __init__(self, fail_slugs=()):
+    def __init__(self, fail_slugs=(), fail_once=(), no_video=False):
         self.composer = load_json("composer_game_star-wars-galactic-racer.json")
         self.new = parse_list(load_json("finder_new_releases.json"))[0]
         self.browse_p1 = parse_list(load_json("finder_browse_new_p1.json"))[0]
         self.fail_slugs = set(fail_slugs)
+        self.fail_once = set(fail_once)
+        self.no_video = no_video
+        self.drop: dict[str, set[str]] = {}
+        self.ids: dict[str, int] = {}
+        self.raise_for: dict[str, BaseException] = {}
+        self.on_game = None
         self.calls = []
+        self.list_error: Exception | None = None
 
     def new_releases(self, limit=20):
         self.calls.append(("new", limit))
+        if self.list_error:
+            raise self.list_error
         return self.new[:limit]
 
     def browse_new(self, offset, limit=24):
         self.calls.append(("browse", offset))
+        if self.list_error:
+            raise self.list_error
         if offset == 0:
             return self.browse_p1[:limit]
         return [ListItem(id=900000 + offset + i, slug=f"old-game-{offset + i}", title=f"Old Game {offset + i}")
                 for i in range(limit)]
 
-    def full_game(self, slug):
-        self.calls.append(("game", slug))
-        if slug in self.fail_slugs:
-            raise RuntimeError(f"boom {slug}")
+    def payload_for(self, slug):
         payload = copy.deepcopy(self.composer)
         known = {i.slug: i for i in self.new + self.browse_p1}
-        item = next(c for c in payload["components"] if c["meta"].get("componentName") == "product")["data"]["item"]
+        item = product_item(payload)
         src = known.get(slug)
         if slug != item["slug"]:
             item["id"] = src.id if src else abs(hash(slug)) % 10**9
@@ -78,26 +116,57 @@ class FakeMetacritic:
             item["description"] = f"{item['title']} is a game about {slug.replace('-', ' ')}."
             item["gameTaxonomy"]["franchises"] = []
             item["genres"] = [{"name": (src.genres[0] if src and src.genres else "Action")}]
-        return parse_composer(payload)
+        if slug in self.ids:
+            item["id"] = self.ids[slug]
+        if self.no_video:
+            item["video"] = None
+        drop = self.drop.get(slug, set())
+        if "platforms" in drop:
+            item.pop("platforms", None)
+        payload["components"] = [c for c in payload["components"]
+                                 if c["meta"].get("componentName") not in drop]
+        return payload
+
+    def full_game(self, slug):
+        self.calls.append(("game", slug))
+        if self.on_game:
+            self.on_game(slug)
+        if slug in self.raise_for:
+            raise self.raise_for.pop(slug)
+        if slug in self.fail_slugs:
+            raise RuntimeError(f"boom {slug}")
+        if slug in self.fail_once:
+            self.fail_once.discard(slug)
+            raise RuntimeError(f"temporary boom {slug}")
+        return parse_composer(self.payload_for(slug))
 
 
 class FakeYouTube:
-    def __init__(self, transcript_ok=True):
+    def __init__(self, transcript_ok=True, blocked=False):
         self.cands = parse_search_html(load_text("yt_search_star-wars-galactic-racer_lets-play_over20min.html"))
         snippets = load_json("yt_transcript_api_bGBXM6oxbag_first200.json")["snippets"]
         self.text = transcript_to_text(snippets)
         self.watch = parse_watch_html(load_text("yt_watch_bGBXM6oxbag.html"))
         self.transcript_ok = transcript_ok
+        self.blocked = blocked
         self.searches = 0
+        self.trailer_searches = 0
 
     def find_letsplays(self, title):
         self.searches += 1
+        if self.blocked:
+            raise YouTubeBlocked("YouTube показал капчу")
         cands = [VideoCandidate(**{**c.__dict__, "queries": []}) for c in self.cands]
         return rank_candidates("Star Wars: Galactic Racer", cands)
 
-    def transcript(self, video_id):
-        from app.youtube import TranscriptUnavailable
+    def find_trailer(self, title):
+        self.trailer_searches += 1
+        if self.blocked:
+            raise YouTubeBlocked("YouTube показал капчу")
+        return VideoCandidate("TrAiLeR0001", f"{title} - Official Trailer", views=1000, length_seconds=120,
+                              channel="Publisher")
 
+    def transcript(self, video_id):
         if not self.transcript_ok:
             raise TranscriptUnavailable("TranscriptsDisabled")
         return self.text, "en"
@@ -109,14 +178,36 @@ class FakeYouTube:
 class FakeLLM:
     model = "fake-model"
 
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, threshold=None):
         self.fail = fail
+        self.threshold = threshold
         self.calls = 0
-        self.budgets = []
+        self.enabled = True
+        self.circuit_open = False
+        self.failures = 0
+        self.runs = 0
+
+    @property
+    def available(self):
+        return self.enabled and not self.circuit_open
+
+    def begin_run(self):
+        self.runs += 1
+        self.circuit_open = False
+        self.failures = 0
 
     def ask_json(self, build, validator=None):
-        self.budgets.append(1600)
-        return self.chat_json(build(1600), validator)
+        if self.circuit_open:
+            raise LLMSkipped("skipped")
+        try:
+            value = self.chat_json(build(1600), validator)
+        except LLMError:
+            self.failures += 1
+            if self.threshold and self.failures >= self.threshold:
+                self.circuit_open = True
+            raise
+        self.failures = 0
+        return value
 
     def chat_json(self, messages, validator=None):
         self.calls += 1
