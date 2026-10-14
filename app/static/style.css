@@ -201,7 +201,18 @@ summary { cursor: pointer; color: var(--accent); font-size: 14px; }
 .log .ERROR, .log .CRITICAL { color: #ff8a8a; }
 .log .ts { color: #6f7a8f; }
 .log .lg { color: #8fb3ff; }
-.conn { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.conn { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.run-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.tile .value.sm { font-size: 20px; }
+.dot.inline { display: inline-block; }
+.dot.cut, .dot.skipped, .dot.interrupted { background: var(--mixed); }
+.run-box { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.run-hint { font-size: 12px; color: var(--muted); max-width: 340px; text-align: right; }
+.video-meta { margin: 8px 0 0; }
+.video-sub { margin: 2px 0 0; }
+.lp-summary { margin-top: 0; }
+.excerpt { margin-top: 10px; }
+.video-source { margin: 10px 0 0; }
 
 footer { border-top: 1px solid var(--border); padding: 18px 0 30px; color: var(--muted); font-size: 13px; }
 

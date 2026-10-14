@@ -26,8 +26,8 @@
       <dt>Платформы</dt><dd>{{ g.platforms|map(attribute='name')|join(', ') or '—' }}</dd>
     </dl>
     <div class="actions">
-      <a class="btn" href="{{ g.metacritic_url }}" target="_blank" rel="noopener">Открыть на Metacritic</a>
-      {% if g.video_embed_url %}<a class="btn ghost" href="{{ g.video_embed_url }}" target="_blank" rel="noopener">Трейлер</a>{% endif %}
+      <a class="btn" href="{{ g.metacritic_url }}" target="_blank" rel="noopener noreferrer">Открыть на Metacritic</a>
+      {% if g.video %}<a class="btn ghost" href="{{ g.video.url|url }}" target="_blank" rel="noopener noreferrer">Трейлер{% if g.video.source == 'youtube' %} (YouTube){% endif %}</a>{% endif %}
     </div>
   </div>
 </section>
@@ -54,14 +54,16 @@
 <section class="section card pad">
   <h2>Описание</h2>
   {% if g.description %}<p class="desc">{{ g.description }}</p>{% else %}<p class="muted">Описания на Metacritic нет.</p>{% endif %}
-  {% if g.video_embed_url %}
+  {% set v = g.video %}
+  {% if v and v.embed_url|url %}
   <details>
-    <summary>Смотреть трейлер{% if g.video_title %}: {{ g.video_title }}{% endif %}</summary>
-    <div class="embed"><iframe src="{{ g.video_embed_url }}" title="{{ g.video_title or 'Трейлер' }}" loading="lazy" allowfullscreen></iframe></div>
-    <p class="small muted">Ссылка на видео: <a href="{{ g.video_embed_url }}" target="_blank" rel="noopener">{{ g.video_embed_url }}</a>{% if g.video_manifest_url %} · <a href="{{ g.video_manifest_url }}" target="_blank" rel="noopener">HLS</a>{% endif %}</p>
+    <summary>Смотреть трейлер{% if v.title %}: {{ v.title }}{% endif %}</summary>
+    <div class="embed"><iframe src="{{ v.embed_url|url }}" title="{{ v.title or 'Трейлер' }}" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></div>
   </details>
+  <p class="small muted video-source">Ссылка на видео: <a href="{{ v.url|url }}" target="_blank" rel="noopener noreferrer">{{ v.url }}</a>{% if v.manifest_url|url %} · <a href="{{ v.manifest_url|url }}" target="_blank" rel="noopener noreferrer">HLS</a>{% endif %}
+    {% if v.source == 'youtube' %}<br>На Metacritic у этой игры видео нет, поэтому показан самый подходящий трейлер с YouTube{% if v.channel %} (канал {{ v.channel }}{% if v.views %}, {{ v.views|num }} просмотров{% endif %}){% endif %}.{% endif %}</p>
   {% else %}
-  <p class="small muted">Видео на Metacritic для этой игры нет.</p>
+  <p class="small muted">Видео для этой игры нет ни на Metacritic, ни среди трейлеров на YouTube.</p>
   {% endif %}
 </section>
 
@@ -86,7 +88,7 @@
       <ul class="quotes">
         {% for r in reviews %}
         <li class="{{ r.sentiment }}"><strong>{% if r.score is not none %}{{ r.score|int if kind == 'critic' else r.score }}{% else %}без оценки{% endif %}</strong>
-          · {% if r.url %}<a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.author or 'рецензия' }}</a>{% else %}{{ r.author or 'аноним' }}{% endif %}{% if r.platform %} · {{ r.platform }}{% endif %}<br>{{ r.quote }}</li>
+          · {% if r.url|url %}<a href="{{ r.url|url }}" target="_blank" rel="noopener noreferrer">{{ r.author or 'рецензия' }}</a>{% else %}{{ r.author or 'аноним' }}{% endif %}{% if r.platform %} · {{ r.platform }}{% endif %}<br>{{ r.quote }}</li>
         {% endfor %}
       </ul>
     </details>
@@ -106,16 +108,16 @@
     {% set v = lp.video %}
     <div class="video">
       <div>
-        <a class="thumb" href="{{ v.url }}" target="_blank" rel="noopener" title="Открыть на YouTube">
-          <img src="https://i.ytimg.com/vi/{{ v.video_id }}/hqdefault.jpg" alt="{{ v.title }}" loading="lazy" referrerpolicy="no-referrer">
+        <a class="thumb" href="https://www.youtube.com/watch?v={{ v.video_id|urlencode }}" target="_blank" rel="noopener noreferrer" title="Открыть на YouTube">
+          <img src="https://i.ytimg.com/vi/{{ v.video_id|urlencode }}/hqdefault.jpg" alt="{{ v.title }}" loading="lazy" referrerpolicy="no-referrer">
           <span class="play"><span>▶</span></span>
         </a>
-        <p class="small" style="margin:8px 0 0"><a href="{{ v.url }}" target="_blank" rel="noopener"><strong>{{ v.title }}</strong></a></p>
-        <p class="small muted" style="margin:2px 0 0">{{ v.channel or '' }} · {{ v.views|num }} просмотров{% if v.length_seconds %} · {{ v.length_seconds|duration }}{% endif %}</p>
+        <p class="small video-meta"><a href="https://www.youtube.com/watch?v={{ v.video_id|urlencode }}" target="_blank" rel="noopener noreferrer"><strong>{{ v.title }}</strong></a></p>
+        <p class="small muted video-sub">{{ v.channel or '' }} · {{ v.views|num }} просмотров{% if v.length_seconds %} · {{ v.length_seconds|duration }}{% endif %}</p>
       </div>
       <div>
         {% if lp.verdict %}<p class="verdict">{{ lp.verdict }}</p>{% endif %}
-        {% if lp.summary %}<p style="margin-top:0">{{ lp.summary }}</p>{% endif %}
+        {% if lp.summary %}<p class="lp-summary">{{ lp.summary }}</p>{% endif %}
         {% if lp.pros %}<h3>Понравилось блогеру</h3><ul class="points likes">{% for x in lp.pros %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
         {% if lp.cons %}<h3>Не понравилось</h3><ul class="points dislikes">{% for x in lp.cons %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
         {% if not lp.summary and not lp.pros and not lp.cons %}<p class="muted">{{ lp.note or 'Заключение построить не удалось.' }} Ссылка на ролик сохранена.</p>{% endif %}
@@ -123,6 +125,7 @@
           {% if lp.status == 'ok' %}Основано на расшифровке речи блогера ({{ lp.transcript_chars|num }} символов, язык: {{ lp.transcript_lang }}).
           {% elif lp.note %}{{ lp.note }}.{% endif %}
           Самый популярный подходящий ролик выбран из поиска YouTube по просмотрам. Обновлено {{ lp.updated_at|dt }}.
+          {% if lp.last_error %}<br><span class="badge err">последняя проверка: {{ lp.last_error }}</span>{% endif %}
           {% if lp.error %}<br><span class="badge err">LLM: {{ lp.error }}</span>{% endif %}
         </div>
       </div>
@@ -130,7 +133,7 @@
     {% if lp.transcript_excerpt %}
     <details>
       <summary>Фрагменты расшифровки речи блогера (начало, середина, конец)</summary>
-      <p class="small desc" style="margin-top:10px">{{ lp.transcript_excerpt }}</p>
+      <p class="small desc excerpt">{{ lp.transcript_excerpt }}</p>
     </details>
     {% endif %}
     {% if lp.candidates and lp.candidates|length > 1 %}
@@ -138,7 +141,7 @@
       <summary>Другие найденные ролики ({{ lp.candidates|length - 1 }})</summary>
       <ul class="quotes">
         {% for c in lp.candidates if c.video_id != v.video_id %}
-        <li><a href="{{ c.url }}" target="_blank" rel="noopener">{{ c.title }}</a> · {{ c.channel }} · {{ c.views|num }} просмотров</li>
+        <li><a href="https://www.youtube.com/watch?v={{ c.video_id|urlencode }}" target="_blank" rel="noopener noreferrer">{{ c.title }}</a> · {{ c.channel }} · {{ c.views|num }} просмотров</li>
         {% endfor %}
       </ul>
     </details>
@@ -151,7 +154,7 @@
   {% if g.similar_games %}
   <div class="similar">
     {% for s in g.similar_games %}
-    <a href="/game/{{ s.slug }}">
+    <a href="/game/{{ s.slug|urlencode }}">
       {{ cover(s.cover_url, s.title) }}
       <span class="sim-title">{{ s.title }}</span>
       <span class="chips">{{ meta_badge(s.metascore) }}{% for r in s.reasons[:2] %}<span class="chip">{{ r }}</span>{% endfor %}</span>

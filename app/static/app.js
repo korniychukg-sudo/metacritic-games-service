@@ -3,9 +3,11 @@
     el.addEventListener("change", function () { el.form.submit(); });
   });
 
+  var TZ = (document.body && document.body.dataset.tz) || undefined;
   var STATUS = {
     idle: "ожидает", running: "работает", waiting: "ждёт запуска", ok: "в норме", error: "ошибка",
-    off: "выключен", partial: "частично", failed: "сбой", empty: "нечего обрабатывать", interrupted: "прерван"
+    off: "выключен", partial: "частично", failed: "сбой", empty: "нечего обрабатывать", interrupted: "прерван",
+    cut: "остановлен по времени", skipped: "пропускается"
   };
   var TRIGGER = { manual: "вручную", schedule: "по расписанию", startup: "при старте" };
 
@@ -18,19 +20,57 @@
   function fmt(iso) {
     if (!iso) return "—";
     var d = new Date(iso);
-    if (isNaN(d)) return iso;
+    if (isNaN(d)) return String(iso);
     try {
       return new Intl.DateTimeFormat("ru-RU", {
-        timeZone: window.APP_TZ || undefined, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
+        timeZone: TZ, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
       }).format(d).replace(",", "");
     } catch (e) {
       return d.toLocaleString("ru-RU");
     }
   }
 
+  function wait(seconds) {
+    seconds = Math.max(0, Math.ceil(seconds));
+    var m = Math.floor(seconds / 60), s = seconds % 60;
+    return m + ":" + (s < 10 ? "0" : "") + s;
+  }
+
   function setText(id, value) {
     var el = document.getElementById(id);
     if (el) el.textContent = value;
+  }
+
+  function setProgress(pct) {
+    var bar = document.getElementById("progress-bar");
+    if (bar) bar.style.width = Math.max(0, Math.min(100, pct || 0)) + "%";
+  }
+
+  var manual = null;
+  var pending = false;
+
+  function renderButton() {
+    var btn = document.getElementById("run-btn");
+    var hint = document.getElementById("run-hint");
+    if (!btn || pending || !manual) return;
+    var text = "Запустить обработку сейчас";
+    var disabled = false;
+    var hintText = "Ручных запусков сегодня: " + manual.runs_today + (manual.daily_cap ? " из " + manual.daily_cap : "") +
+      ". После каждого запуска пауза " + Math.round(manual.cooldown_seconds / 60) + " мин.";
+    if (manual.code === "busy") {
+      text = "Обработка идёт…";
+      disabled = true;
+    } else if (manual.code === "cooldown" || manual.code === "cap") {
+      var left = manual.available_at ? (new Date(manual.available_at) - Date.now()) / 1000 : manual.retry_after;
+      if (left > 0) {
+        disabled = true;
+        text = manual.code === "cap" ? "Лимит ручных запусков на сегодня" : "Запуск через " + wait(left);
+        hintText = manual.reason || hintText;
+      }
+    }
+    btn.disabled = disabled;
+    btn.textContent = text;
+    if (hint) hint.textContent = hintText;
   }
 
   function render(st) {
@@ -39,17 +79,13 @@
     document.getElementById("run-dot").className = "dot " + (running ? "running" : "idle");
     setText("run-state", running ? "Идёт обработка" : "Ожидание");
     setText("run-step", p.step ? p.step + (p.current && p.step.indexOf(p.current) < 0 ? ": " + p.current : "") : "");
-    var pct = p.total ? Math.round(100 * p.done / p.total) : 0;
-    document.getElementById("progress-bar").style.width = pct + "%";
+    setProgress(p.total ? Math.round(100 * p.done / p.total) : 0);
     setText("progress-text", p.total
       ? "Запуск #" + p.run_id + ": " + p.done + " из " + p.total + " · успешно " + p.ok + ", ошибок " + p.failed
       : "Нет активной обработки");
 
-    var btn = document.getElementById("run-btn");
-    if (btn && !btn.dataset.pending) {
-      btn.disabled = running;
-      btn.textContent = running ? "Обработка идёт…" : "Запустить обработку сейчас";
-    }
+    manual = st.manual || manual;
+    renderButton();
 
     var t = st.totals || {};
     setText("t-total", t.games_total);
@@ -77,15 +113,15 @@
     var runs = document.getElementById("runs");
     if (runs) {
       runs.innerHTML = (st.runs || []).length ? st.runs.map(function (r) {
-        return "<tr><td>" + r.id + "</td><td>" + fmt(r.started_at) + "</td><td>" + esc(TRIGGER[r.trigger] || r.trigger) +
-          '</td><td><span class="dot ' + esc(r.status) + '" style="display:inline-block"></span> ' + esc(STATUS[r.status] || r.status) +
-          "</td><td>" + r.ok + "/" + r.selected + (r.failed ? ", ошибок " + r.failed : "") + "</td></tr>";
+        return "<tr><td>" + esc(r.id) + "</td><td>" + esc(fmt(r.started_at)) + "</td><td>" + esc(TRIGGER[r.trigger] || r.trigger) +
+          '</td><td><span class="dot inline ' + esc(r.status) + '"></span> ' + esc(STATUS[r.status] || r.status) +
+          "</td><td>" + esc(r.ok) + "/" + esc(r.selected) + (r.failed ? ", ошибок " + esc(r.failed) : "") + "</td></tr>";
       }).join("") : '<tr><td colspan="5" class="muted">Запусков ещё не было</td></tr>';
     }
     var errors = document.getElementById("errors");
     if (errors) {
       errors.innerHTML = (st.errors || []).length ? st.errors.map(function (e) {
-        return "<tr><td>" + fmt(e.at) + "</td><td>" + esc(e.slug || "—") + '<br><span class="muted small">' + esc(e.step) +
+        return "<tr><td>" + esc(fmt(e.at)) + "</td><td>" + esc(e.slug || "—") + '<br><span class="muted small">' + esc(e.step) +
           '</span></td><td class="small">' + esc(e.message) + "</td></tr>";
       }).join("") : '<tr><td colspan="3" class="muted">Ошибок нет</td></tr>';
     }
@@ -114,24 +150,42 @@
     el.textContent = text;
   }
 
-  window.initMonitor = function () {
+  function initMonitor() {
     var form = document.getElementById("run-form");
     var btn = document.getElementById("run-btn");
+    var bar = document.getElementById("progress-bar");
+    if (bar) setProgress(Number(bar.dataset.pct || 0));
+    if (form) {
+      var d = form.dataset;
+      manual = {
+        code: d.code || "ok",
+        available_at: d.availableAt || null,
+        runs_today: Number(d.runsToday || 0),
+        daily_cap: Number(d.dailyCap || 0),
+        cooldown_seconds: Number(d.cooldown || 0),
+        retry_after: Number(d.retryAfter || 0),
+        reason: d.reason || ""
+      };
+    }
     if (form && window.fetch) {
       form.addEventListener("submit", function (ev) {
         ev.preventDefault();
+        pending = true;
         btn.disabled = true;
-        btn.dataset.pending = "1";
         btn.textContent = "Запускаю…";
-        fetch("/api/run", { method: "POST" }).then(function (r) {
-          flash(r.status === 202 ? "Обработка запущена." : "Обработка уже идёт, второй запуск не нужен.", r.status === 202);
-        }).catch(function () {
-          flash("Не удалось связаться с сервером.", false);
-        }).finally(function () {
-          delete btn.dataset.pending;
-        });
+        fetch("/run", { method: "POST", headers: { "Accept": "application/json" }, credentials: "same-origin" })
+          .then(function (r) { return r.json().then(function (body) { return { status: r.status, body: body }; }); })
+          .then(function (res) {
+            flash(res.status === 202 ? "Обработка запущена." : (res.body.detail || "Запуск отклонён."), res.status === 202);
+          }).catch(function () {
+            flash("Не удалось связаться с сервером.", false);
+          }).finally(function () {
+            pending = false;
+            renderButton();
+          });
       });
     }
+    setInterval(renderButton, 1000);
 
     var connDot = document.getElementById("conn-dot");
     var connText = document.getElementById("conn-text");
@@ -161,5 +215,7 @@
       });
     }
     connect();
-  };
+  }
+
+  if (document.getElementById("run-form")) initMonitor();
 })();

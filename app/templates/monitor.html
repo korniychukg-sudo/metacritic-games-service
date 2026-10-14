@@ -1,25 +1,34 @@
 {% extends "base.html" %}
 {% block title %}Мониторинг · Игры Metacritic{% endblock %}
 {% block content %}
+{% set m = st.manual %}
 <div class="page-head">
   <div>
     <h1>Мониторинг сервиса</h1>
-    <p class="muted">Обработка запускается каждые {{ st.config.interval_minutes }} мин, за раз до {{ st.config.batch_size }} игр. Страница обновляется в реальном времени.</p>
+    <p class="muted">Обработка запускается каждые {{ st.config.interval_minutes }} мин, за раз до {{ st.config.batch_size }} игр, не дольше {{ st.config.run_max_minutes }} мин. Страница обновляется в реальном времени.</p>
   </div>
-  <form method="post" action="/run" id="run-form">
-    <button class="btn" type="submit" id="run-btn" {% if st.running %}disabled{% endif %}>{% if st.running %}Обработка идёт…{% else %}Запустить обработку сейчас{% endif %}</button>
+  <form method="post" action="/run" id="run-form" class="run-box" data-available-at="{{ m.available_at or '' }}" data-code="{{ m.code }}" data-runs-today="{{ m.runs_today }}" data-daily-cap="{{ m.daily_cap }}" data-cooldown="{{ m.cooldown_seconds }}" data-retry-after="{{ m.retry_after }}" data-reason="{{ m.reason }}">
+    <button class="btn" type="submit" id="run-btn" {% if not m.allowed %}disabled{% endif %}>
+      {%- if m.code == 'busy' %}Обработка идёт…{% elif m.code == 'cooldown' %}Запуск через {{ m.retry_after|wait }}{% elif m.code == 'cap' %}Лимит ручных запусков на сегодня{% else %}Запустить обработку сейчас{% endif -%}
+    </button>
+    <span class="run-hint" id="run-hint">{% if m.code in ('cooldown', 'cap') %}{{ m.reason }}{% else %}Ручных запусков сегодня: {{ m.runs_today }}{% if m.daily_cap %} из {{ m.daily_cap }}{% endif %}. После каждого запуска пауза {{ (m.cooldown_seconds // 60) }} мин.{% endif %}</span>
   </form>
 </div>
 
-{% if started %}<div class="banner ok" id="flash">Обработка запущена.</div>{% elif busy %}<div class="banner" id="flash">Обработка уже идёт, второй запуск не нужен.</div>{% else %}<div class="banner" id="flash" hidden></div>{% endif %}
+{% if started %}<div class="banner ok" id="flash">Обработка запущена.</div>
+{% elif busy %}<div class="banner" id="flash">Обработка уже идёт, второй запуск не нужен.</div>
+{% elif wait %}<div class="banner" id="flash">Запуск отклонён: после предыдущей обработки должно пройти {{ (m.cooldown_seconds // 60) }} мин. Попробуйте через {{ wait|wait }}.</div>
+{% elif cap %}<div class="banner" id="flash">Запуск отклонён: достигнут дневной лимит ручных запусков.</div>
+{% elif forbidden %}<div class="banner" id="flash">Запуск разрешён только со страницы мониторинга этого сервиса.</div>
+{% else %}<div class="banner" id="flash" hidden></div>{% endif %}
 
 <section class="card pad">
-  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+  <div class="run-line">
     <span class="status-pill"><span class="dot {{ 'running' if st.running else 'idle' }}" id="run-dot"></span><span id="run-state">{{ 'Идёт обработка' if st.running else 'Ожидание' }}</span></span>
     <span class="muted small" id="run-step">{% if st.progress.step %}{{ st.progress.step }}{% if st.progress.current %}: {{ st.progress.current }}{% endif %}{% endif %}</span>
-    <span class="conn" style="margin-left:auto"><span class="dot" id="conn-dot"></span><span id="conn-text">подключение…</span></span>
+    <span class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text">подключение…</span></span>
   </div>
-  <div class="progress"><div id="progress-bar" style="width: {{ (100 * st.progress.done / st.progress.total)|round|int if st.progress.total else 0 }}%"></div></div>
+  <div class="progress"><div id="progress-bar" data-pct="{{ (100 * st.progress.done / st.progress.total)|round|int if st.progress.total else 0 }}"></div></div>
   <div class="muted small" id="progress-text">{% if st.progress.total %}{{ st.progress.done }} из {{ st.progress.total }} · успешно {{ st.progress.ok }}, ошибок {{ st.progress.failed }}{% else %}Нет активной обработки{% endif %}</div>
 </section>
 
@@ -27,8 +36,8 @@
   <div class="card tile"><div class="label">Игр в базе</div><div class="value" id="t-total">{{ st.totals.games_total }}</div></div>
   <div class="card tile"><div class="label">Обработано сегодня</div><div class="value" id="t-today">{{ st.totals.processed_today }}</div><div class="sub" id="t-today-sub">успешно {{ st.totals.processed_today_ok }} · {{ st.day }}</div></div>
   <div class="card tile"><div class="label">Ошибок сегодня</div><div class="value" id="t-errors">{{ st.totals.errors_today }}</div><div class="sub" id="t-errors-sub">всего {{ st.totals.errors_total }}</div></div>
-  <div class="card tile"><div class="label">Последний запуск</div><div class="value" style="font-size:20px" id="t-last">{{ st.last_run.started_at|dt if st.last_run else '—' }}</div><div class="sub" id="t-last-sub">{% if st.last_run %}{{ st.last_run.status|status_ru }} · {{ st.last_run.ok }}/{{ st.last_run.selected }}{% endif %}</div></div>
-  <div class="card tile"><div class="label">Следующий запуск</div><div class="value" style="font-size:20px" id="t-next">{{ st.next_run_at|dt if st.next_run_at else '—' }}</div><div class="sub" id="t-cursor">{% if st.day_state.new_releases_done %}New Releases пройден, SEE ALL с позиции {{ st.day_state.browse_offset }}{% else %}сегодня ещё идёт блок New Releases{% endif %}</div></div>
+  <div class="card tile"><div class="label">Последний запуск</div><div class="value sm" id="t-last">{{ st.last_run.started_at|dt if st.last_run else '—' }}</div><div class="sub" id="t-last-sub">{% if st.last_run %}{{ st.last_run.status|status_ru }} · {{ st.last_run.ok }}/{{ st.last_run.selected }}{% endif %}</div></div>
+  <div class="card tile"><div class="label">Следующий запуск</div><div class="value sm" id="t-next">{{ st.next_run_at|dt if st.next_run_at else '—' }}</div><div class="sub" id="t-cursor">{% if st.day_state.new_releases_done %}New Releases пройден, SEE ALL с позиции {{ st.day_state.browse_offset }}{% else %}сегодня ещё идёт блок New Releases{% endif %}</div></div>
 </section>
 
 <section class="section">
@@ -56,7 +65,7 @@
         <thead><tr><th>#</th><th>Старт</th><th>Как</th><th>Итог</th><th>Игры</th></tr></thead>
         <tbody id="runs">
           {% for r in st.runs %}
-          <tr><td>{{ r.id }}</td><td>{{ r.started_at|dt }}</td><td>{{ r.trigger|trigger_ru }}</td><td><span class="dot {{ r.status }}" style="display:inline-block"></span> {{ r.status|status_ru }}</td><td>{{ r.ok }}/{{ r.selected }}{% if r.failed %}, ошибок {{ r.failed }}{% endif %}</td></tr>
+          <tr><td>{{ r.id }}</td><td>{{ r.started_at|dt }}</td><td>{{ r.trigger|trigger_ru }}</td><td><span class="dot inline {{ r.status }}"></span> {{ r.status|status_ru }}</td><td>{{ r.ok }}/{{ r.selected }}{% if r.failed %}, ошибок {{ r.failed }}{% endif %}</td></tr>
           {% else %}
           <tr><td colspan="5" class="muted">Запусков ещё не было</td></tr>
           {% endfor %}
@@ -81,6 +90,5 @@
   </section>
 </div>
 
-<p class="small muted section">LLM: {{ st.config.llm_model }} ({{ st.config.llm_endpoint }}) · YouTube: {{ 'включён' if st.config.youtube_enabled else 'выключен' }} · планировщик: {{ 'включён' if st.config.scheduler_enabled else 'выключен' }} · сервис запущен {{ st.started_at|dt }}</p>
+<p class="small muted section">LLM: {{ st.config.llm_model }} ({{ st.config.llm_endpoint }}) · YouTube: {{ 'включён' if st.config.youtube_enabled else 'выключен' }} · планировщик: {{ 'включён' if st.config.scheduler_enabled else 'выключен' }}{% if st.scheduler.enabled and not st.scheduler.healthy %} <span class="badge err">планировщик не отвечает</span>{% endif %} · сервис запущен {{ st.started_at|dt }}</p>
 {% endblock %}
-{% block scripts %}<script>window.initMonitor && window.initMonitor();</script>{% endblock %}

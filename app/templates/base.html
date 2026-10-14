@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Игры Metacritic{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css?v=4">
+  <link rel="stylesheet" href="/static/style.css?v={{ static_version }}">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f5bea'/%3E%3Ctext x='16' y='22' font-size='16' font-family='Arial' font-weight='700' fill='white' text-anchor='middle'%3EMC%3C/text%3E%3C/svg%3E">
 </head>
-<body>
+<body data-tz="{{ tz_name }}">
   <header class="topbar">
     <div class="wrap">
       <a class="brand" href="/"><span class="brand-mark">MC</span><span>Игры <span class="full">Metacritic: дайджест</span></span></a>
@@ -25,8 +25,6 @@
   <footer>
     <div class="wrap">Данные: Metacritic (раздел Games) и YouTube. Резюме отзывов и заключения по летсплеям генерирует LLM; если она недоступна, показывается автоматическая выборка цитат. Время в часовом поясе {{ tz_name }}.</div>
   </footer>
-  <script>window.APP_TZ = {{ tz_name|tojson }};</script>
-  <script src="/static/app.js?v=4"></script>
-  {% block scripts %}{% endblock %}
+  <script src="/static/app.js?v={{ static_version }}"></script>
 </body>
 </html>

@@ -1,29 +1,36 @@
 import asyncio
+import hmac
 import json
 import logging
 import math
 import os
+import threading
+import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import MutableHeaders
 
-from .config import Settings, settings as default_settings
+from .config import Settings, iso, parse_iso, settings as default_settings, utcnow
 from .db import SORTS, Database
 from .http_client import PoliteClient
 from .llm import LLMClient
-from .metacritic import MetacriticClient
+from .metacritic import MetacriticClient, safe_url
 from .monitor import Monitor, MonitorLogHandler, monitor as default_monitor
 from .pipeline import Pipeline
 from .scheduler import Scheduler
-from .youtube import YouTubeClient
+from .youtube import VIDEO_ID, YouTubeClient
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PAGE_SIZE = 24
+MAX_PAGE = 10000
+STATIC_VERSION = "5"
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
           "ноября", "декабря"]
 SORT_LABELS = {
@@ -48,17 +55,53 @@ METHOD_LABELS = {
 STATUS_LABELS = {
     "idle": "ожидает", "running": "работает", "waiting": "ждёт запуска", "ok": "в норме", "error": "ошибка",
     "off": "выключен", "partial": "частично", "failed": "сбой", "empty": "нечего обрабатывать",
-    "interrupted": "прерван",
+    "interrupted": "прерван", "cut": "остановлен по времени", "skipped": "пропускается",
 }
 TRIGGER_LABELS = {"manual": "вручную", "schedule": "по расписанию", "startup": "при старте"}
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
+       "frame-src https://cdn.jwplayer.com https://www.youtube-nocookie.com; connect-src 'self'; font-src 'self'; "
+       "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+SECURITY_HEADERS = {
+    "content-security-policy": CSP,
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "x-frame-options": "DENY",
+}
+CSP_EXEMPT = ("/docs", "/redoc")
 
 log = logging.getLogger("app")
 
 
+class SecurityHeadersMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        exempt = scope.get("path", "").startswith(CSP_EXEMPT)
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for key, value in SECURITY_HEADERS.items():
+                    if exempt and key in ("content-security-policy", "x-frame-options"):
+                        continue
+                    if key not in headers:
+                        headers[key] = value
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
 def setup_logging(level: str, monitor: Monitor) -> None:
     root = logging.getLogger()
-    if not any(isinstance(h, MonitorLogHandler) for h in root.handlers):
+    handler = next((h for h in root.handlers if isinstance(h, MonitorLogHandler)), None)
+    if handler is None:
         root.addHandler(MonitorLogHandler(monitor))
+    else:
+        handler.monitor = monitor
     if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, MonitorLogHandler) for h in root.handlers):
         sh = logging.StreamHandler()
         sh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
@@ -73,7 +116,9 @@ def build_services(s: Settings, db: Database, monitor: Monitor) -> Pipeline:
                         on_request=monitor.http_event)
     llm = LLMClient(s.llm_base_url, s.llm_model, s.llm_api_key, s.llm_timeout, s.llm_min_gap or None,
                     s.llm_retries, s.llm_temperature, s.llm_enabled, on_call=monitor.llm_event,
-                    max_prompt_chars=s.llm_max_prompt_chars or None)
+                    max_prompt_chars=s.llm_max_prompt_chars or None, failure_threshold=s.llm_failure_threshold,
+                    on_state=lambda status, detail: monitor.set_worker("llm", status, detail),
+                    reasoning_effort=s.llm_reasoning_effort)
     yt = YouTubeClient(http, s.youtube_proxy_url) if s.youtube_enabled else None
     if not s.youtube_enabled:
         monitor.set_worker("youtube", "off", "поиск летсплеев выключен (YOUTUBE_ENABLED=0)")
@@ -95,7 +140,7 @@ def fmt_date(value: str | None) -> str:
 def fmt_num(value) -> str:
     if value is None:
         return "—"
-    return f"{int(value):,}".replace(",", " ")
+    return f"{int(value):,}".replace(",", " ")
 
 
 def fmt_duration(seconds) -> str:
@@ -104,6 +149,12 @@ def fmt_duration(seconds) -> str:
     h, rem = divmod(int(seconds), 3600)
     m = rem // 60
     return f"{h} ч {m} мин" if h else f"{m} мин"
+
+
+def fmt_wait(seconds) -> str:
+    seconds = max(0, int(seconds or 0))
+    m, s = divmod(seconds, 60)
+    return f"{m}:{s:02d}"
 
 
 def meta_class(score) -> str:
@@ -122,6 +173,10 @@ def fmt_user(score) -> str:
     return "—" if score is None else f"{score:.1f}"
 
 
+def web_url(value) -> str:
+    return safe_url(value, schemes=("https", "http")) or ""
+
+
 def make_templates(s: Settings) -> Jinja2Templates:
     templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
     env = templates.env
@@ -129,30 +184,152 @@ def make_templates(s: Settings) -> Jinja2Templates:
     def fmt_dt(value: str | None) -> str:
         if not value:
             return "—"
-        try:
-            dt = datetime.fromisoformat(value)
-        except ValueError:
+        dt = parse_iso(value)
+        if dt is None:
             return value
         return dt.astimezone(s.day_tz).strftime("%d.%m %H:%M")
 
     env.filters.update(
         date_ru=fmt_date, num=fmt_num, duration=fmt_duration, meta_class=meta_class, user_class=user_class,
-        user_fmt=fmt_user, dt=fmt_dt,
+        user_fmt=fmt_user, dt=fmt_dt, wait=fmt_wait, url=web_url,
         method=lambda m: METHOD_LABELS.get(m or "none", m or ""),
         status_ru=lambda st: STATUS_LABELS.get(st, st),
         trigger_ru=lambda t: TRIGGER_LABELS.get(t, t),
     )
-    env.globals.update(sort_labels=SORT_LABELS, tz_name=s.day_tz_name)
+    env.globals.update(sort_labels=SORT_LABELS, tz_name=s.day_tz_name, static_version=STATIC_VERSION)
     return templates
 
 
-def status_payload(app: FastAPI) -> dict:
+@dataclass
+class RunDecision:
+    allowed: bool
+    status_code: int = 202
+    reason: str = ""
+    retry_after: int = 0
+    code: str = "ok"
+
+
+class RunGuard:
+    def __init__(self, settings: Settings, db: Database, pipeline: Pipeline, clock=utcnow):
+        self.settings = settings
+        self.db = db
+        self.pipeline = pipeline
+        self.clock = clock
+        self._lock = threading.Lock()
+
+    def state(self) -> dict:
+        s = self.settings
+        now = self.clock()
+        day = s.today(now)
+        runs_today = self.db.count_runs(day, "manual")
+        info = {
+            "allowed": True,
+            "code": "ok",
+            "reason": "",
+            "retry_after": 0,
+            "available_at": None,
+            "runs_today": runs_today,
+            "daily_cap": s.manual_daily_cap,
+            "cooldown_seconds": s.manual_cooldown_seconds,
+            "token_required_for_api": bool(s.run_token),
+        }
+        if self.pipeline.running:
+            info.update(allowed=False, code="busy", reason="Обработка уже идёт")
+            return info
+        finished = parse_iso(self.db.last_finished_at())
+        if finished and s.manual_cooldown_seconds:
+            ready = finished.timestamp() + s.manual_cooldown_seconds
+            wait = math.ceil(ready - now.timestamp())
+            if wait > 0:
+                info.update(allowed=False, code="cooldown", retry_after=wait,
+                            available_at=iso(datetime.fromtimestamp(ready, now.tzinfo)),
+                            reason=f"Повторный запуск возможен через {fmt_wait(wait)}: между запусками "
+                                   f"нужна пауза {s.manual_cooldown_seconds // 60} мин, чтобы не перегружать "
+                                   "Metacritic, YouTube и LLM")
+                return info
+        if s.manual_daily_cap and runs_today >= s.manual_daily_cap:
+            midnight = s.next_midnight(now)
+            wait = max(1, math.ceil((midnight - now).total_seconds()))
+            info.update(allowed=False, code="cap", retry_after=wait, available_at=iso(midnight),
+                        reason=f"Достигнут дневной лимит ручных запусков ({s.manual_daily_cap}). "
+                               "Плановые запуски продолжаются каждый час")
+        return info
+
+    def try_start(self, limit: int | None = None) -> RunDecision:
+        with self._lock:
+            st = self.state()
+            if not st["allowed"]:
+                code = 409 if st["code"] == "busy" else 429
+                return RunDecision(False, code, st["reason"], st["retry_after"], st["code"])
+            if not self.pipeline.start_background("manual", limit):
+                return RunDecision(False, 409, "Обработка уже идёт", 0, "busy")
+            return RunDecision(True, 202, "Обработка запущена", 0, "started")
+
+
+def same_origin(request: Request) -> bool:
+    site = request.headers.get("sec-fetch-site")
+    if site and site not in ("same-origin", "none"):
+        return False
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True
+    if origin == "null":
+        return False
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    return urlparse(origin).netloc.lower() == host.split(",")[0].strip().lower()
+
+
+def token_ok(request: Request, token: str) -> bool:
+    if not token:
+        return True
+    auth = request.headers.get("authorization", "")
+    given = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-run-token", "")
+    return bool(given) and hmac.compare_digest(given.encode(), token.encode())
+
+
+def video_info(g: dict) -> dict | None:
+    embed = safe_url(g.get("video_embed_url"))
+    if embed:
+        return {"source": "metacritic", "embed_url": embed, "url": embed, "title": g.get("video_title"),
+                "manifest_url": safe_url(g.get("video_manifest_url"))}
+    trailer = g.get("trailer") or {}
+    video = trailer.get("video") or {}
+    vid = video.get("video_id")
+    if trailer.get("status") == "ok" and isinstance(vid, str) and VIDEO_ID.match(vid):
+        return {"source": "youtube", "embed_url": f"https://www.youtube-nocookie.com/embed/{vid}",
+                "url": f"https://www.youtube.com/watch?v={vid}", "title": video.get("title"),
+                "channel": video.get("channel"), "views": video.get("views"), "manifest_url": None}
+    return None
+
+
+class StatusCache:
+    def __init__(self, max_age: float = 5.0):
+        self.max_age = max_age
+        self._lock = threading.Lock()
+        self._key = None
+        self._at = 0.0
+        self._value: dict | None = None
+
+    def get(self, version: int, build) -> dict:
+        with self._lock:
+            if self._value is not None and self._key == version and time.monotonic() - self._at < self.max_age:
+                return self._value
+        value = build()
+        with self._lock:
+            self._key, self._at, self._value = version, time.monotonic(), value
+        return value
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._value = None
+
+
+def build_status(app: FastAPI) -> dict:
     s: Settings = app.state.settings
     db: Database = app.state.db
     mon: Monitor = app.state.monitor
     snap = mon.snapshot()
-    day = s.today()
-    last = db.last_run()
+    day = s.today(app.state.clock())
     snap.update(
         day=day,
         running=app.state.pipeline.running,
@@ -164,12 +341,15 @@ def status_payload(app: FastAPI) -> dict:
             "errors_total": db.error_count(),
         },
         day_state=db.get_day_state(day).__dict__,
-        last_run=last,
+        last_run=db.last_run(),
         runs=db.recent_runs(8),
         errors=db.recent_errors(8),
+        manual=app.state.guard.state(),
+        scheduler=app.state.scheduler.health(),
         config={
             "batch_size": s.batch_size,
             "interval_minutes": s.run_interval_minutes,
+            "run_max_minutes": s.run_max_minutes,
             "scheduler_enabled": s.scheduler_enabled,
             "llm_model": s.llm_model,
             "llm_endpoint": s.llm_base_url.split("//")[-1].split("/")[0],
@@ -180,29 +360,40 @@ def status_payload(app: FastAPI) -> dict:
     return snap
 
 
+def status_payload(app: FastAPI) -> dict:
+    return app.state.status_cache.get(app.state.monitor.version, lambda: build_status(app))
+
+
 def create_app(s: Settings | None = None, pipeline: Pipeline | None = None, start_scheduler: bool = True,
-               monitor: Monitor | None = None) -> FastAPI:
+               monitor: Monitor | None = None, clock=utcnow) -> FastAPI:
     s = s or default_settings
     mon = monitor or default_monitor
+    mon.tz = s.day_tz
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         setup_logging(s.log_level, mon)
-        app.state.db.close_stale_runs()
+        closed = app.state.db.close_stale_runs(clock(), s.lease_ttl_seconds)
+        if closed:
+            log.warning("Closed %d run(s) left running by a stopped process", closed)
         if start_scheduler:
             app.state.scheduler.start()
-        log.info("Service started, DB %s", os.path.abspath(s.db_path))
+        log.info("Service started, DB %s (schema v%d)", os.path.abspath(s.db_path), app.state.db.schema_version)
         yield
         if start_scheduler:
             app.state.scheduler.stop()
 
     app = FastAPI(title="Metacritic Games Digest", lifespan=lifespan)
-    db = Database(s.db_path)
+    app.add_middleware(SecurityHeadersMiddleware)
+    db = pipeline.db if pipeline is not None else Database(s.db_path)
     app.state.settings = s
     app.state.db = db
     app.state.monitor = mon
+    app.state.clock = clock
     app.state.pipeline = pipeline or build_services(s, db, mon)
-    app.state.scheduler = Scheduler(s, db, app.state.pipeline, mon)
+    app.state.scheduler = Scheduler(s, db, app.state.pipeline, mon, clock=clock)
+    app.state.guard = RunGuard(s, db, app.state.pipeline, clock=clock)
+    app.state.status_cache = StatusCache()
     templates = make_templates(s)
     app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
@@ -215,17 +406,28 @@ def create_app(s: Settings | None = None, pipeline: Pipeline | None = None, star
         g["similar_games"] = [{**briefs[x["id"]], "score": x["score"], "reasons": x.get("reasons", [])}
                               for x in sim if x["id"] in briefs]
         g["metacritic_url"] = f"https://www.metacritic.com/game/{g['slug']}/"
+        g["video"] = video_info(g)
+        g["video_url"] = g["video"]["url"] if g["video"] else None
+        for key in ("backfill_at", "backfill_attempts", "title_search"):
+            g.pop(key, None)
         return g
 
     def query_games(q, platform, sort, page):
         sort = sort if sort in SORTS else "date_desc"
-        page = max(1, page)
         rows, total = db.list_games(q or None, platform or None, sort, PAGE_SIZE, (page - 1) * PAGE_SIZE)
-        return rows, total, sort, page
+        return rows, total, sort
 
-    @app.get("/", response_class=HTMLResponse)
-    def index(request: Request, q: str = "", platform: str = "", sort: str = "date_desc", page: int = 1):
-        rows, total, sort, page = query_games(q, platform, sort, page)
+    def run_response(decision: RunDecision) -> JSONResponse:
+        headers = {"Retry-After": str(decision.retry_after)} if decision.retry_after else {}
+        if decision.allowed:
+            app.state.status_cache.invalidate()
+        return JSONResponse({"started": decision.allowed, "code": decision.code, "detail": decision.reason,
+                             "retry_after": decision.retry_after}, status_code=decision.status_code, headers=headers)
+
+    @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
+    def index(request: Request, q: str = Query("", max_length=200), platform: str = Query("", max_length=100),
+              sort: str = "date_desc", page: int = Query(1, ge=1, le=MAX_PAGE)):
+        rows, total, sort = query_games(q, platform, sort, page)
         pages = max(1, math.ceil(total / PAGE_SIZE))
 
         def page_url(n: int) -> str:
@@ -235,7 +437,8 @@ def create_app(s: Settings | None = None, pipeline: Pipeline | None = None, star
         return templates.TemplateResponse(request, "index.html", {
             "games": rows, "total": total, "q": q, "platform": platform, "sort": sort, "page": page,
             "pages": pages, "page_url": page_url, "platforms": db.platform_options(),
-            "games_in_db": db.count_games(), "running": app.state.pipeline.running,
+            "games_in_db": db.count_games(), "running": app.state.pipeline.running, "batch_size": s.batch_size,
+            "interval_label": "час" if s.run_interval_minutes == 60 else f"{s.run_interval_minutes} мин",
         })
 
     @app.get("/game/{slug}", response_class=HTMLResponse)
@@ -243,25 +446,42 @@ def create_app(s: Settings | None = None, pipeline: Pipeline | None = None, star
         return templates.TemplateResponse(request, "game.html", {"g": game_view(slug)})
 
     @app.get("/monitor", response_class=HTMLResponse)
-    def monitor_page(request: Request, started: int = 0, busy: int = 0):
+    def monitor_page(request: Request, started: int = 0, busy: int = 0, wait: int = 0, cap: int = 0,
+                     forbidden: int = 0):
         return templates.TemplateResponse(request, "monitor.html", {
-            "st": status_payload(app), "started": started, "busy": busy,
+            "st": build_status(app), "started": started, "busy": busy, "wait": wait, "cap": cap,
+            "forbidden": forbidden,
         })
 
     @app.post("/run")
-    def run_form():
-        ok = app.state.pipeline.start_background("manual")
-        return RedirectResponse("/monitor?" + ("started=1" if ok else "busy=1"), status_code=303)
+    def run_form(request: Request):
+        wants_json = "application/json" in request.headers.get("accept", "")
+        if not same_origin(request):
+            decision = RunDecision(False, 403, "Запуск разрешён только со страницы мониторинга этого сервиса",
+                                   code="forbidden")
+        else:
+            decision = app.state.guard.try_start()
+        if wants_json:
+            return run_response(decision)
+        query = {"started": "started=1", "busy": "busy=1", "forbidden": "forbidden=1", "cap": "cap=1",
+                 "cooldown": f"wait={decision.retry_after}"}.get(decision.code, "busy=1")
+        return RedirectResponse("/monitor?" + query, status_code=303)
 
     @app.post("/api/run")
-    def run_api(limit: int | None = Query(default=None, ge=1, le=100)):
-        if not app.state.pipeline.start_background("manual", limit):
-            return JSONResponse({"started": False, "detail": "Обработка уже идёт"}, status_code=409)
-        return JSONResponse({"started": True}, status_code=202)
+    def run_api(request: Request, limit: int | None = Query(default=None, ge=1, le=100)):
+        if not same_origin(request):
+            return run_response(RunDecision(False, 403, "Кросс-доменные запросы на запуск запрещены",
+                                            code="forbidden"))
+        if not token_ok(request, s.run_token):
+            return JSONResponse({"started": False, "code": "unauthorized",
+                                 "detail": "Нужен токен: заголовок Authorization: Bearer <RUN_TOKEN>"},
+                                status_code=401, headers={"WWW-Authenticate": "Bearer"})
+        return run_response(app.state.guard.try_start(limit))
 
     @app.get("/api/games")
-    def api_games(q: str = "", platform: str = "", sort: str = "date_desc", page: int = 1):
-        rows, total, sort, page = query_games(q, platform, sort, page)
+    def api_games(q: str = Query("", max_length=200), platform: str = Query("", max_length=100),
+                  sort: str = "date_desc", page: int = Query(1, ge=1, le=MAX_PAGE)):
+        rows, total, sort = query_games(q, platform, sort, page)
         return {"total": total, "page": page, "page_size": PAGE_SIZE, "sort": sort, "items": rows}
 
     @app.get("/api/games/{slug}")
@@ -281,7 +501,7 @@ def create_app(s: Settings | None = None, pipeline: Pipeline | None = None, star
         return db.recent_runs(limit)
 
     @app.get("/api/events")
-    async def events(request: Request, last_log: int = 0, once: int = 0):
+    async def events(request: Request, last_log: int = Query(0, ge=0), once: int = 0):
         async def stream():
             last_version = -1
             last_id = last_log
@@ -307,9 +527,17 @@ def create_app(s: Settings | None = None, pipeline: Pipeline | None = None, star
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.get("/healthz")
+    @app.api_route("/healthz", methods=["GET", "HEAD"])
     def healthz():
-        return {"status": "ok", "games": db.count_games(), "running": app.state.pipeline.running}
+        sched = app.state.scheduler.health()
+        try:
+            games = db.count_games()
+            db_ok = True
+        except Exception:
+            games, db_ok = None, False
+        healthy = db_ok and sched["healthy"]
+        body = {"status": "ok" if healthy else "degraded", "db": db_ok, "games": games,
+                "running": app.state.pipeline.running, "scheduler": sched}
+        return JSONResponse(body, status_code=200 if healthy else 503)
 
     return app
-

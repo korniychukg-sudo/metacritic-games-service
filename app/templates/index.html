@@ -5,7 +5,7 @@
 <div class="page-head">
   <div>
     <h1>Новые игры с Metacritic</h1>
-    <p class="muted">В базе {{ games_in_db }} {{ 'игра' if games_in_db % 10 == 1 and games_in_db % 100 != 11 else ('игры' if games_in_db % 10 in [2,3,4] and games_in_db % 100 not in [12,13,14] else 'игр') }}. Сервис раз в час забирает 20 новых игр и обновляет уже известные.</p>
+    <p class="muted">В базе {{ games_in_db }} {{ 'игра' if games_in_db % 10 == 1 and games_in_db % 100 != 11 else ('игры' if games_in_db % 10 in [2,3,4] and games_in_db % 100 not in [12,13,14] else 'игр') }}. Сервис раз в {{ interval_label }} забирает до {{ batch_size }} новых игр и обновляет уже известные.</p>
   </div>
   <a class="btn ghost" href="/monitor">Мониторинг{% if running %} · идёт обработка{% endif %}</a>
 </div>
@@ -34,7 +34,7 @@
 {% if games %}
 <div class="grid">
   {% for g in games %}
-  <a class="card game-tile" href="/game/{{ g.slug }}">
+  <a class="card game-tile" href="/game/{{ g.slug|urlencode }}">
     {{ cover(g.cover_url, g.title) }}
     <div class="tile-body">
       <div class="tile-title">{{ g.title }}</div>

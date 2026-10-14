@@ -6,7 +6,7 @@
 {%- endmacro %}
 {% macro cover(url, title) -%}
 <div class="cover">
-  {% if url %}<img src="{{ url }}" alt="{{ title }}" loading="lazy" referrerpolicy="no-referrer">{% else %}<div class="noimg">нет обложки</div>{% endif %}
+  {% if url|url %}<img src="{{ url|url }}" alt="{{ title }}" loading="lazy" referrerpolicy="no-referrer">{% else %}<div class="noimg">нет обложки</div>{% endif %}
 </div>
 {%- endmacro %}
 {% macro method_badge(method) -%}
