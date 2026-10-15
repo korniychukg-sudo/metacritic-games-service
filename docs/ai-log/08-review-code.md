@@ -22,7 +22,7 @@ What was done so far:
 FIX STEP: All 19 review items are fixed and every listed test gap now has real tests. The full suite is green at 153 tests, and a fresh end-to-end run against live Metacritic processed 10 games with 0 errors. The work is in 9 new commits on `main` (f2dc1f9..bfa7edc), nothing pushed or deployed.
 
 Two things are still on you before submitting:
-- **The user's home IP is still in git history.** Commit f2dc1f9 contains the visitor ids and the IP 203.0.113.7 inside `docs/samples/yt_*.html`. I redacted the files in a new commit, but the old commit still has them. Rewriting history is destructive, so I didn't. Since nothing has been pushed, squashing or filtering before the first push would remove them.
+- **The user's home IP is still in git history.** Commit f2dc1f9 contains the visitor ids and the IP [IP] inside `docs/samples/yt_*.html`. I redacted the files in a new commit, but the old commit still has them. Rewriting history is destructive, so I didn't. Since nothing has been pushed, squashing or filtering before the first push would remove them.
 - **The ТЗ also asks for a working service URL and the chat log with the AI.** I couldn't produce either: deploying was ruled out and I don't have the transcript.
 
 **Requirements pass.** Everything in the ТЗ was already there except one gap: 3 of 5 cards had no video link, because Metacritic simply has no video for those games. Cards now fall back to the official trailer from YouTube, searched once a week and only for those games. I also made "similar games" require a real shared signal (franchise, developer, genre or similar description) instead of just sharing PC.
@@ -97,7 +97,7 @@ Two things are still on you before submitting:
 
 Each commit's tests pass on a clean checkout.
 
-Repo: `~/dev/skytec-metacritic`. Smoke database and logs: `<scratchpad>/smoke/`
+Repo: `~/dev/skytec-metacritic`. Smoke database and logs: `[scratchpad]/smoke/`
 SPEECH STEP: Whisper is now the speech-to-text fallback when captions aren't available, and it's committed as `695f428` on `main` (not pushed or deployed). The full suite passes at 192 tests, up from 153, including on a clean export of HEAD. I proved it on one real game with captions turned off, and also in a full scheduled run of the actual service.
 
 **What was added**
@@ -143,7 +143,7 @@ SPEECH STEP: Whisper is now the speech-to-text fallback when captions aren't ava
 - **Description fallback is still misleading.** When it kicks in, the LLM still writes "автор ролика отмечает…" from the video description, which can read as the blogger's opinion.
 - **yt-dlp will need maintenance.** It already warns that without the Deno JavaScript runtime some YouTube formats may disappear. Audio tracks still come through today. If they stop, the service falls back to the description, and yt-dlp will need regular updates.
 
-The proof logs and database are in `<scratchpad>/proof/`. The full-run logs are in `scratchpad/e2e/`. The downloaded models (682 MB) are in `scratchpad/models/` and can be deleted.
+The proof logs and database are in `[scratchpad]/proof/`. The full-run logs are in `scratchpad/e2e/`. The downloaded models (682 MB) are in `scratchpad/models/` and can be deleted.
 
 Files are in `~/dev/skytec-metacritic`:
 - app/stt.py
@@ -178,7 +178,7 @@ Housekeeping: 8765 and 8793 are free. Port 8791 had another uvicorn of this repo
    - Как исправить: Deploy (user action; Railway steps are already in README §Деплой), then put the public URL in the first lines of the README. Export the AI conversation to docs/ai-chat.md (or a shared link) and link it right under the URL.
 2. **[major]** `git history: commit f2dc1f9, docs/samples/yt_search_star-wars-galactic-racer_*.html (3 files) and docs/samples/yt_watch_bGBXM6oxbag.html`
    - Что: HEAD is redacted, but commit f2dc1f9 still contains the user's home IP (in `remoteHost`) and the real `visitorData` tokens in 4 files. The first push would publish them.
-   - Как исправить: Before the first push, rewrite history. Either squash all 13 commits into one with `git reset --soft $(git rev-list --max-parents=0 HEAD)` plus an amend, or run `git filter-repo --replace-text` over docs/samples. Then check with `git grep 203.0 $(git rev-list --all)`.
+   - Как исправить: Before the first push, rewrite history. Either squash all 13 commits into one with `git reset --soft $(git rev-list --max-parents=0 HEAD)` plus an amend, or run `git filter-repo --replace-text` over docs/samples. Then check with `git grep [IP] $(git rev-list --all)`.
 3. **[major]** `app/pipeline.py:369-379 and app/pipeline.py:418-424`
    - Что: A refresh saves whatever `find_letsplay` returns, even when it is worse than what is stored. Only exceptions keep the old record. Reproduced: a captions-based `llm-transcript` result is replaced on the day-8 refresh by `no_transcript`/`llm-description` when captions are blocked, and the excerpt is lost. Two days later an empty search replaces it with `no_video` and the video link is gone. `ensure_trailer` does the same: a `status: none` result overwrites a stored `ok` trailer, so the card loses its only video link.
    - Как исправить: In `process_game`: if the old let's play has status ok with a method in FULL_LETSPLAY (or has a video) and the new one is not ok, store `{**old_lp, 'last_error': new.get('note'), 'checked_at': now}` instead. In `ensure_trailer`: if the old trailer is ok and the new result is `none`, keep it and only bump `checked_at`. Add tests in tests/test_pipeline.py next to `test_blocked_youtube_keeps_the_previous_video`.

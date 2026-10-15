@@ -22,7 +22,7 @@ The service is built and committed (commit f2dc1f9, 54 tests green). The goal no
 CODE REVIEW of f2dc1f9:
 **Senior code review: ~/dev/skytec-metacritic (commit f2dc1f9)**
 
-All 54 tests pass on Python 3.12.13. I changed no code. I checked the items marked [verified] with a throwaway script against the real code; that script is at `<scratchpad>/review/probe.py`.
+All 54 tests pass on Python 3.12.13. I changed no code. I checked the items marked [verified] with a throwaway script against the real code; that script is at `[scratchpad]/review/probe.py`.
 
 **What holds up**
 - **Restart:** stale runs are closed before the scheduler starts, the next run is timed from the last run's start, and each game is recorded as soon as it is done. The page cursor is saved only at the end, so an interrupted run resumes cleanly.
@@ -171,7 +171,7 @@ Return: list of fixes per review item, anything deliberately left with reasons, 
 All 19 review items are fixed and every listed test gap now has real tests. The full suite is green at 153 tests, and a fresh end-to-end run against live Metacritic processed 10 games with 0 errors. The work is in 9 new commits on `main` (f2dc1f9..bfa7edc), nothing pushed or deployed.
 
 Two things are still on you before submitting:
-- **The user's home IP is still in git history.** Commit f2dc1f9 contains the visitor ids and the IP 203.0.113.7 inside `docs/samples/yt_*.html`. I redacted the files in a new commit, but the old commit still has them. Rewriting history is destructive, so I didn't. Since nothing has been pushed, squashing or filtering before the first push would remove them.
+- **The user's home IP is still in git history.** Commit f2dc1f9 contains the visitor ids and the IP [IP] inside `docs/samples/yt_*.html`. I redacted the files in a new commit, but the old commit still has them. Rewriting history is destructive, so I didn't. Since nothing has been pushed, squashing or filtering before the first push would remove them.
 - **The ТЗ also asks for a working service URL and the chat log with the AI.** I couldn't produce either: deploying was ruled out and I don't have the transcript.
 
 **Requirements pass.** Everything in the ТЗ was already there except one gap: 3 of 5 cards had no video link, because Metacritic simply has no video for those games. Cards now fall back to the official trailer from YouTube, searched once a week and only for those games. I also made "similar games" require a real shared signal (franchise, developer, genre or similar description) instead of just sharing PC.
@@ -246,7 +246,7 @@ Two things are still on you before submitting:
 
 Each commit's tests pass on a clean checkout.
 
-Repo: `~/dev/skytec-metacritic`. Smoke database and logs: `<scratchpad>/smoke/`
+Repo: `~/dev/skytec-metacritic`. Smoke database and logs: `[scratchpad]/smoke/`
 
 ## Ход работы
 

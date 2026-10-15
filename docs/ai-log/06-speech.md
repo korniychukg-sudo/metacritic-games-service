@@ -21,7 +21,7 @@ Previous step report:
 All 19 review items are fixed and every listed test gap now has real tests. The full suite is green at 153 tests, and a fresh end-to-end run against live Metacritic processed 10 games with 0 errors. The work is in 9 new commits on `main` (f2dc1f9..bfa7edc), nothing pushed or deployed.
 
 Two things are still on you before submitting:
-- **The user's home IP is still in git history.** Commit f2dc1f9 contains the visitor ids and the IP 203.0.113.7 inside `docs/samples/yt_*.html`. I redacted the files in a new commit, but the old commit still has them. Rewriting history is destructive, so I didn't. Since nothing has been pushed, squashing or filtering before the first push would remove them.
+- **The user's home IP is still in git history.** Commit f2dc1f9 contains the visitor ids and the IP [IP] inside `docs/samples/yt_*.html`. I redacted the files in a new commit, but the old commit still has them. Rewriting history is destructive, so I didn't. Since nothing has been pushed, squashing or filtering before the first push would remove them.
 - **The ТЗ also asks for a working service URL and the chat log with the AI.** I couldn't produce either: deploying was ruled out and I don't have the transcript.
 
 **Requirements pass.** Everything in the ТЗ was already there except one gap: 3 of 5 cards had no video link, because Metacritic simply has no video for those games. Cards now fall back to the official trailer from YouTube, searched once a week and only for those games. I also made "similar games" require a real shared signal (franchise, developer, genre or similar description) instead of just sharing PC.
@@ -96,7 +96,7 @@ Two things are still on you before submitting:
 
 Each commit's tests pass on a clean checkout.
 
-Repo: `~/dev/skytec-metacritic`. Smoke database and logs: `<scratchpad>/smoke/`
+Repo: `~/dev/skytec-metacritic`. Smoke database and logs: `[scratchpad]/smoke/`
 
 Context: the let's play feature turns the blogger's speech into text using YouTube captions (youtube-transcript-api), and falls back to the video description when captions are missing. The ТЗ asks to "перевести рассказ блогера в текст", so add a real speech-recognition fallback.
 
@@ -157,7 +157,7 @@ Whisper is now the speech-to-text fallback when captions aren't available, and i
 - **Description fallback is still misleading.** When it kicks in, the LLM still writes "автор ролика отмечает…" from the video description, which can read as the blogger's opinion.
 - **yt-dlp will need maintenance.** It already warns that without the Deno JavaScript runtime some YouTube formats may disappear. Audio tracks still come through today. If they stop, the service falls back to the description, and yt-dlp will need regular updates.
 
-The proof logs and database are in `<scratchpad>/proof/`. The full-run logs are in `scratchpad/e2e/`. The downloaded models (682 MB) are in `scratchpad/models/` and can be deleted.
+The proof logs and database are in `[scratchpad]/proof/`. The full-run logs are in `scratchpad/e2e/`. The downloaded models (682 MB) are in `scratchpad/models/` and can be deleted.
 
 Files are in `~/dev/skytec-metacritic`:
 - app/stt.py
@@ -236,7 +236,7 @@ Files are in `~/dev/skytec-metacritic`:
 - `Bash` Measure tiny, base and small through the real path
 - `Bash` Prepare a proof database copy and proof script
 - `Bash` Back up the smoke database into the proof folder
-- `Write` <scratchpad>/proof/prove_whisper.py
+- `Write` [scratchpad]/proof/prove_whisper.py
 - `Bash` Prove Whisper on Valor Mortis with captions disabled
 - `Bash` Check samples and tests for no-commentary video titles
 - `Bash` Locate code to change for no-speech handling

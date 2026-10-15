@@ -210,7 +210,7 @@ Files are in `~/dev/skytec-metacritic`:
 - `Bash` Read the server startup log
 - `Bash` Read the background task output and create the scratchpad
 - `Bash` Start the service locally with a 4-game batch for the smoke test
-- `Monitor` command=tail -n +1 -f <tmp> description=smoke-run progress and errors in server.log
+- `Monitor` command=tail -n +1 -f [tmp] description=smoke-run progress and errors in server.log
 - `Bash` Add Dockerfile, Procfile, railway.json and env example
 - `Bash` Check the server log after the run starts
 - `Bash` Inspect the first processed game via the JSON API
@@ -235,7 +235,7 @@ Files are in `~/dev/skytec-metacritic`:
 - `TaskStop` task_id=bo2linfnt
 - `Bash` Restart the service with the updated code
 - `Bash` Wait for startup and trigger a manual run through the API
-- `Monitor` command=tail -n +1 -f <tmp> description=manual smoke run #2 progress and errors
+- `Monitor` command=tail -n +1 -f [tmp] description=manual smoke run #2 progress and errors
 - `Write` ~/dev/skytec-metacritic/README.md
 - `Bash` Wait for manual run #2 to finish
 - `Bash` Measure the free LLM endpoint cooldown between successful calls
@@ -246,7 +246,7 @@ Files are in `~/dev/skytec-metacritic`:
 - `TaskStop` task_id=bh0cc2bkq
 - `Bash` Restart the service with LLM pacing
 - `Bash` Trigger manual run #3 and check the parallel-run guard
-- `Monitor` command=tail -n +1 -f <tmp> description=manual smoke run #3 progress and errors
+- `Monitor` command=tail -n +1 -f [tmp] description=manual smoke run #3 progress and errors
 - `Skill` skill=anthropic-skills:built-in-browser
 - `preview_start` http://127.0.0.1:8000/
 - `computer` screenshot
@@ -272,7 +272,7 @@ Files are in `~/dev/skytec-metacritic`:
 - `TaskStop` task_id=bvdpd77tg
 - `TaskStop` task_id=bs2ued7f3
 - `Bash` Start the final smoke run on a fresh database
-- `Monitor` command=tail -n +1 -F <tmp> description=final smoke run progress and errors
+- `Monitor` command=tail -n +1 -F [tmp] description=final smoke run progress and errors
 - `Bash` Find embedded API keys and visitor ids in sample files
 - `Bash` Redact embedded public keys and visitor ids in samples, rerun tests
 - `Bash` Initialise git, stage files and scan for secrets

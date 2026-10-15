@@ -89,7 +89,7 @@ TASK: senior code review of ~/dev/skytec-metacritic: correctness and robustness 
 
 **Senior code review: ~/dev/skytec-metacritic (commit f2dc1f9)**
 
-All 54 tests pass on Python 3.12.13. I changed no code. I checked the items marked [verified] with a throwaway script against the real code; that script is at `<scratchpad>/review/probe.py`.
+All 54 tests pass on Python 3.12.13. I changed no code. I checked the items marked [verified] with a throwaway script against the real code; that script is at `[scratchpad]/review/probe.py`.
 
 **What holds up**
 - **Restart:** stale runs are closed before the scheduler starts, the next run is timed from the last run's start, and each game is recorded as soon as it is done. The page cursor is saved only at the end, so an interrupted run resumes cleanly.

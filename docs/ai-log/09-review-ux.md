@@ -22,7 +22,7 @@ What was done so far:
 FIX STEP: All 19 review items are fixed and every listed test gap now has real tests. The full suite is green at 153 tests, and a fresh end-to-end run against live Metacritic processed 10 games with 0 errors. The work is in 9 new commits on `main` (f2dc1f9..bfa7edc), nothing pushed or deployed.
 
 Two things are still on you before submitting:
-- **The user's home IP is still in git history.** Commit f2dc1f9 contains the visitor ids and the IP 203.0.113.7 inside `docs/samples/yt_*.html`. I redacted the files in a new commit, but the old commit still has them. Rewriting history is destructive, so I didn't. Since nothing has been pushed, squashing or filtering before the first push would remove them.
+- **The user's home IP is still in git history.** Commit f2dc1f9 contains the visitor ids and the IP [IP] inside `docs/samples/yt_*.html`. I redacted the files in a new commit, but the old commit still has them. Rewriting history is destructive, so I didn't. Since nothing has been pushed, squashing or filtering before the first push would remove them.
 - **The ТЗ also asks for a working service URL and the chat log with the AI.** I couldn't produce either: deploying was ruled out and I don't have the transcript.
 
 **Requirements pass.** Everything in the ТЗ was already there except one gap: 3 of 5 cards had no video link, because Metacritic simply has no video for those games. Cards now fall back to the official trailer from YouTube, searched once a week and only for those games. I also made "similar games" require a real shared signal (franchise, developer, genre or similar description) instead of just sharing PC.
@@ -97,7 +97,7 @@ Two things are still on you before submitting:
 
 Each commit's tests pass on a clean checkout.
 
-Repo: `~/dev/skytec-metacritic`. Smoke database and logs: `<scratchpad>/smoke/`
+Repo: `~/dev/skytec-metacritic`. Smoke database and logs: `[scratchpad]/smoke/`
 SPEECH STEP: Whisper is now the speech-to-text fallback when captions aren't available, and it's committed as `695f428` on `main` (not pushed or deployed). The full suite passes at 192 tests, up from 153, including on a clean export of HEAD. I proved it on one real game with captions turned off, and also in a full scheduled run of the actual service.
 
 **What was added**
@@ -143,7 +143,7 @@ SPEECH STEP: Whisper is now the speech-to-text fallback when captions aren't ava
 - **Description fallback is still misleading.** When it kicks in, the LLM still writes "автор ролика отмечает…" from the video description, which can read as the blogger's opinion.
 - **yt-dlp will need maintenance.** It already warns that without the Deno JavaScript runtime some YouTube formats may disappear. Audio tracks still come through today. If they stop, the service falls back to the description, and yt-dlp will need regular updates.
 
-The proof logs and database are in `<scratchpad>/proof/`. The full-run logs are in `scratchpad/e2e/`. The downloaded models (682 MB) are in `scratchpad/models/` and can be deleted.
+The proof logs and database are in `[scratchpad]/proof/`. The full-run logs are in `scratchpad/e2e/`. The downloaded models (682 MB) are in `scratchpad/models/` and can be deleted.
 
 Files are in `~/dev/skytec-metacritic`:
 - app/stt.py
@@ -197,7 +197,7 @@ Problems found:
    - Что: During the cooldown the button counts down every second ('Запуск через 4:31' → '3:50'), but the hint below keeps the server text with a frozen time, 'Повторный запуск возможен через 4:31…'. I confirmed in the browser that after 4 s the button had changed and the hint had not. Both formatters print only minutes:seconds, so long waits show as '1364:03'.
    - Как исправить: Remove the time from the server reason ('Между запусками нужна пауза N мин, чтобы не перегружать Metacritic, YouTube и LLM') and build the hint on the client as 'Можно запустить через ' + wait(left). Make fmt_wait and wait() print 'Ч:ММ:СС' once the wait is 3600 s or more.
 9. **[minor]** `app/main.py:405; app/pipeline.py:199-200, 220-222, 263, 273, 291; app/scheduler.py:77, 95; app/db.py:544-546 (recent_runs → /api/runs, /api/status)`
-   - Что: The live log on the public Russian monitor shows English lines and the absolute DB path ('Service started, DB /private/tmp/…/games.db (schema v4)'). /api/runs and /api/status return the 'owner' field with the machine hostname ('<host>:76659:…'). The worker detail prints the raw trigger code ('запуск #3 (manual): выбор игр'), and line 220 lower-cases a message that can contain exception text and proper names.
+   - Что: The live log on the public Russian monitor shows English lines and the absolute DB path ('Service started, DB /private/tmp/…/games.db (schema v4)'). /api/runs and /api/status return the 'owner' field with the machine hostname ('[host]:76659:…'). The worker detail prints the raw trigger code ('запуск #3 (manual): выбор игр'), and line 220 lower-cases a message that can contain exception text and proper names.
    - Как исправить: Log only the database file name and schema version. Translate the roughly 10 run-level messages a viewer sees (run started or finished, selection, time limit, retry, scheduler next run), or rename the section to 'Технический журнал'. Drop 'owner' from API output: select explicit columns in recent_runs. Use TRIGGER_LABELS in the worker detail and remove .lower().
 10. **[minor]** `app/db.py:167 (search_key) and 472-474`
    - Что: Search is a substring match after casefold only, so 'dragons dogma' does not find "Dragon's Dogma 2" and 'warhammer 40000' does not find 'Warhammer 40,000: Boltgun 2'. Both are natural queries, and a reviewer gets 'Ничего не найдено'.

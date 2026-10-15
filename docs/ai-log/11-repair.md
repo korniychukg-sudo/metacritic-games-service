@@ -1,6 +1,6 @@
 # Исправления по четырём ревью
 
-Агент `11-repair`, начат 15.10.2026 02:15, работал около 523 мин, вызовов инструментов: 215.
+Агент `11-repair`, начат 15.10.2026 02:15, работал около 525 мин, вызовов инструментов: 222.
 
 ## Промпт, который получил агент
 
@@ -28,16 +28,16 @@ Problems found by independent reviewers (round 1):
   },
   {
     "severity": "blocker",
-    "where": "README.md (no section), docs/ (no log); source material is in ~/.claude/projects/<project>/*.jsonl and <внешний диск>",
+    "where": "README.md (no section), docs/ (no log); source material is in ~/.claude/projects/[project]/*.jsonl and [внешний диск]",
     "what": "The ТЗ deliverable «переписка с нейросетью» is not in the repo, and the README does not mention it. An employer reviewing the repo sees no AI chat log at all.",
-    "fix": "Export the relevant Claude Code sessions to Markdown and save them as docs/ai-log/*.md. Strip every system-reminder/memory block first: the transcripts contain the user's private memory and tool output with tokens. Add a «Переписка с нейросетью» section near the top of README.md that links the log and summarises the prompt pipeline from <личные заметки>.",
+    "fix": "Export the relevant Claude Code sessions to Markdown and save them as docs/ai-log/*.md. Strip every system-reminder/memory block first: the transcripts contain the user's private memory and tool output with tokens. Add a «Переписка с нейросетью» section near the top of README.md that links the log and summarises the prompt pipeline from [личные заметки].",
     "lens": "requirements"
   },
   {
     "severity": "blocker",
     "where": "git history: commit f2dc1f9, docs/samples/yt_search_*.html (3 files) and docs/samples/yt_watch_bGBXM6oxbag.html; `git remote -v` is empty",
-    "what": "The «репозиторий» deliverable does not exist yet: nothing is pushed. The first commit still holds the home IP 203.0.113.7 (`git grep 203.0.113.7 f2dc1f9` matches 4 files) plus the visitorData values. Pushing as-is publishes them.",
-    "fix": "Rewrite history before the first push and keep the commit sequence: `pip install git-filter-repo`, then write expr.txt with `203.0.113.7==>203.0.113.7` and a regex line for each visitorData/VISITOR_DATA value redacted in 270096c (`regex:\"visitorData\":\"[^\"]+\"==>\"visitorData\":\"REDACTED\"` and so on). Run `git filter-repo --replace-text expr.txt --force` and confirm `git log -p --all | grep -c 203.0.113.7` returns 0. Then create a public GitHub repo, push, and put its link in README.md.",
+    "what": "The «репозиторий» deliverable does not exist yet: nothing is pushed. The first commit still holds the home IP [IP] (`git grep [IP] f2dc1f9` matches 4 files) plus the visitorData values. Pushing as-is publishes them.",
+    "fix": "Rewrite history before the first push and keep the commit sequence: `pip install git-filter-repo`, then write expr.txt with `[IP]==>203.0.113.7` and a regex line for each visitorData/VISITOR_DATA value redacted in 270096c (`regex:\"visitorData\":\"[^\"]+\"==>\"visitorData\":\"REDACTED\"` and so on). Run `git filter-repo --replace-text expr.txt --force` and confirm `git log -p --all | grep -c [IP]` returns 0. Then create a public GitHub repo, push, and put its link in README.md.",
     "lens": "requirements"
   },
   {
@@ -50,7 +50,7 @@ Problems found by independent reviewers (round 1):
   {
     "severity": "major",
     "where": "README.md:373-379 (Проверка на живых данных); database state: day_state new_releases_done=0, browse_offset=0, both runs selected=5, sources=new-releases",
-    "what": "Selection rule 2 (SEE ALL paging, sorted by newest) and the default batch of 20 have never run against live Metacritic. All 10 games in every local database come from New Releases with BATCH_SIZE=5, so New Releases was never even completed. The README therefore has no live evidence for half of the selection logic. The user's own plan (<личные заметки>, step 8: «живой прогон двух партий по 20 игр») is not reflected yet. The repo's data/games.db is also stale (schema v0, 5 games, no trailers or Whisper).",
+    "what": "Selection rule 2 (SEE ALL paging, sorted by newest) and the default batch of 20 have never run against live Metacritic. All 10 games in every local database come from New Releases with BATCH_SIZE=5, so New Releases was never even completed. The README therefore has no live evidence for half of the selection logic. The user's own plan ([личные заметки], step 8: «живой прогон двух партий по 20 игр») is not reflected yet. The repo's data/games.db is also stale (schema v0, 5 games, no trailers or Whisper).",
     "fix": "On a fresh database with default settings, let the startup run finish (20 New Releases), then press the button after the 5-minute pause (or run a 3rd time). Check that runs.sources goes `new-releases` → `browse:p1, browse:p2` and that day_state moves to new_releases_done=1 with browse_offset 24 or 48. Add a table of these runs (games, sources, minutes, errors, LLM/fallback counts) to README.md:373. Use this database for the deployed volume and any local demo.",
     "lens": "requirements"
   },
@@ -121,7 +121,7 @@ Problems found by independent reviewers (round 1):
     "severity": "major",
     "where": "git history: commit f2dc1f9, docs/samples/yt_search_star-wars-galactic-racer_*.html (3 files) and docs/samples/yt_watch_bGBXM6oxbag.html",
     "what": "HEAD is redacted, but commit f2dc1f9 still contains the user's home IP (in `remoteHost`) and the real `visitorData` tokens in 4 files. The first push would publish them.",
-    "fix": "Before the first push, rewrite history. Either squash all 13 commits into one with `git reset --soft $(git rev-list --max-parents=0 HEAD)` plus an amend, or run `git filter-repo --replace-text` over docs/samples. Then check with `git grep 203.0 $(git rev-list --all)`.",
+    "fix": "Before the first push, rewrite history. Either squash all 13 commits into one with `git reset --soft $(git rev-list --max-parents=0 HEAD)` plus an amend, or run `git filter-repo --replace-text` over docs/samples. Then check with `git grep [IP] $(git rev-list --all)`.",
     "lens": "code"
   },
   {
@@ -246,7 +246,7 @@ Problems found by independent reviewers (round 1):
   {
     "severity": "minor",
     "where": "app/main.py:405; app/pipeline.py:199-200, 220-222, 263, 273, 291; app/scheduler.py:77, 95; app/db.py:544-546 (recent_runs → /api/runs, /api/status)",
-    "what": "The live log on the public Russian monitor shows English lines and the absolute DB path ('Service started, DB /private/tmp/…/games.db (schema v4)'). /api/runs and /api/status return the 'owner' field with the machine hostname ('<host>:76659:…'). The worker detail prints the raw trigger code ('запуск #3 (manual): выбор игр'), and line 220 lower-cases a message that can contain exception text and proper names.",
+    "what": "The live log on the public Russian monitor shows English lines and the absolute DB path ('Service started, DB /private/tmp/…/games.db (schema v4)'). /api/runs and /api/status return the 'owner' field with the machine hostname ('[host]:76659:…'). The worker detail prints the raw trigger code ('запуск #3 (manual): выбор игр'), and line 220 lower-cases a message that can contain exception text and proper names.",
     "fix": "Log only the database file name and schema version. Translate the roughly 10 run-level messages a viewer sees (run started or finished, selection, time limit, retry, scheduler next run), or rename the section to 'Технический журнал'. Drop 'owner' from API output: select explicit columns in recent_runs. Use TRIGGER_LABELS in the worker detail and remove .lower().",
     "lens": "ux"
   },
@@ -317,14 +317,14 @@ Problems found by independent reviewers (round 1):
     "severity": "blocker",
     "where": "README.md:1-11 (no live link anywhere in the README; nothing in docs/ either)",
     "what": "The ТЗ asks for three things: a repo, a working service and the chat log with the AI. The repo has neither a deployed service URL nor the chat log. A reviewer opening the README has nothing to click and no AI transcript to read. This alone can get the submission rejected, however good the code is.",
-    "fix": "The user has to deploy it; agents were not allowed to. Deploy to Railway: Dockerfile builder, a Volume mounted at /data, no variables required. On the Trial plan also set STT_MODEL=tiny or STT_ENABLED=0 (see the memory item below). Wait for the first scheduled run, about 15 s after start plus 30–40 min for a full batch. On /monitor, check whether the YouTube worker shows RequestBlocked. If only captions are blocked, set YOUTUBE_CAPTIONS=0. Then add a line such as «Демо: https://<name>.up.railway.app (мониторинг: /monitor)» directly under the H1 in README.md. Export the AI transcript to e.g. docs/ai-chat.md and link it from the README. Before committing it, scrub it with grep -nE '203.0.113.7|@gmail\\.com|@mail\\.ru|github-token|railway-token|/Users/'. The sessions contain the home IP, both email addresses and token file paths.",
+    "fix": "The user has to deploy it; agents were not allowed to. Deploy to Railway: Dockerfile builder, a Volume mounted at /data, no variables required. On the Trial plan also set STT_MODEL=tiny or STT_ENABLED=0 (see the memory item below). Wait for the first scheduled run, about 15 s after start plus 30–40 min for a full batch. On /monitor, check whether the YouTube worker shows RequestBlocked. If only captions are blocked, set YOUTUBE_CAPTIONS=0. Then add a line such as «Демо: https://<name>.up.railway.app (мониторинг: /monitor)» directly under the H1 in README.md. Export the AI transcript to e.g. docs/ai-chat.md and link it from the README. Before committing it, scrub it with grep -nE '[IP]|@gmail\\.com|@mail\\.ru|github-token|railway-token|/Users/'. The sessions contain the home IP, both email addresses and token file paths.",
     "lens": "security-deploy"
   },
   {
     "severity": "major",
     "where": "git history: commits f2dc1f9 and 3b3f3e6, docs/samples/yt_search_star-wars-galactic-racer_lets-play_byviews.html, ..._lets-play_over20min.html, ..._prohozhdenie_over20min.html, yt_watch_bGBXM6oxbag.html (line 18)",
-    "what": "Checked with git grep over every rev: the user's home IP 203.0.113.7 is in 4 files in both f2dc1f9 and 3b3f3e6, so not only f2dc1f9 as the handoff said. remoteHost and about 277 ip= stream-URL parameters carry it, next to the unredacted VISITOR_DATA/visitorData. 270096c only redacts it going forward, so the first push would publish the IP. Commit authorship is also mixed: f2dc1f9 is <email> and the other 11 commits are <email>.",
-    "fix": "Nothing is pushed yet, so rewrite before the first push. First commit the extra redaction from the minor item below, call that commit R. Then run: git filter-branch --prune-empty --tree-filter 'for f in docs/samples/yt_search_star-wars-galactic-racer_lets-play_byviews.html docs/samples/yt_search_star-wars-galactic-racer_lets-play_over20min.html docs/samples/yt_search_star-wars-galactic-racer_prohozhdenie_over20min.html docs/samples/yt_watch_bGBXM6oxbag.html; do [ -f \"$f\" ] && git show R:\"$f\" > \"$f\"; done' -- main. Optionally add --env-filter 'export GIT_AUTHOR_EMAIL=<chosen> GIT_COMMITTER_EMAIL=<chosen>' to unify the identity. Then delete the backup refs and prune: git for-each-ref --format='%(refname)' refs/original | xargs -n1 git update-ref -d; git reflog expire --expire=now --all; git gc --prune=now. Check that for c in $(git rev-list --all); do git grep -l 203.0.113.7 $c; done prints nothing, and rerun pytest. Commit SHAs will change, so update any SHAs quoted elsewhere.",
+    "what": "Checked with git grep over every rev: the user's home IP [IP] is in 4 files in both f2dc1f9 and 3b3f3e6, so not only f2dc1f9 as the handoff said. remoteHost and about 277 ip= stream-URL parameters carry it, next to the unredacted VISITOR_DATA/visitorData. 270096c only redacts it going forward, so the first push would publish the IP. Commit authorship is also mixed: f2dc1f9 is [email] and the other 11 commits are [email].",
+    "fix": "Nothing is pushed yet, so rewrite before the first push. First commit the extra redaction from the minor item below, call that commit R. Then run: git filter-branch --prune-empty --tree-filter 'for f in docs/samples/yt_search_star-wars-galactic-racer_lets-play_byviews.html docs/samples/yt_search_star-wars-galactic-racer_lets-play_over20min.html docs/samples/yt_search_star-wars-galactic-racer_prohozhdenie_over20min.html docs/samples/yt_watch_bGBXM6oxbag.html; do [ -f \"$f\" ] && git show R:\"$f\" > \"$f\"; done' -- main. Optionally add --env-filter 'export GIT_AUTHOR_EMAIL=<chosen> GIT_COMMITTER_EMAIL=<chosen>' to unify the identity. Then delete the backup refs and prune: git for-each-ref --format='%(refname)' refs/original | xargs -n1 git update-ref -d; git reflog expire --expire=now --all; git gc --prune=now. Check that for c in $(git rev-list --all); do git grep -l [IP] $c; done prints nothing, and rerun pytest. Commit SHAs will change, so update any SHAs quoted elsewhere.",
     "lens": "security-deploy"
   },
   {
@@ -344,7 +344,7 @@ Problems found by independent reviewers (round 1):
   {
     "severity": "minor",
     "where": "docs/samples/yt_search_star-wars-galactic-racer_lets-play_byviews.html:18, ..._lets-play_over20min.html:18, ..._prohozhdenie_over20min.html:18, yt_watch_bGBXM6oxbag.html:18",
-    "what": "The redaction is incomplete, which contradicts the claim in README.md:416-418. Each file still has a per-visitor DATASYNC_ID / datasyncId (V<id>||, V<id>||, V<id>||, V<id>||, 13 times each) and a rolloutToken. Both are signed-out visitor identifiers, the same kind of data visitorData is.",
+    "what": "The redaction is incomplete, which contradicts the claim in README.md:416-418. Each file still has a per-visitor DATASYNC_ID / datasyncId (V[id]||, V[id]||, V[id]||, V[id]||, 13 times each) and a rolloutToken. Both are signed-out visitor identifiers, the same kind of data visitorData is.",
     "fix": "Run sed -E -i '' 's/(\"(DATASYNC_ID|datasyncId)\":\")V[0-9a-f]+\\|\\|/\\1REDACTED||/g; s/(\"rolloutToken\":\")[^\"]+/\\1REDACTED/g' on the four files, run pytest, and commit before doing the history rewrite above, so the rewrite also cleans the old commits. Extend the README sentence to mention datasyncId and rolloutToken.",
     "lens": "security-deploy"
   },
@@ -362,34 +362,111 @@ TASK: verify each problem; fix every real one; for a false alarm, explain why. K
 
 ## Итоговый ответ агента
 
-_Итог этапа записан по коммитам: ответ агента формируется после выгрузки этого лога._
+All 48 findings are handled except two that need you: deploying the service and pushing the repository. The rules forbid both for agents, so the README says the links will be added after those steps. 225 tests pass, and nothing is listening on 87xx or 8000.
 
-Проверены все 48 находок четырёх ревьюеров. Исправлено в коде и документации:
+History was rewritten locally with `git filter-branch`, so every commit hash changed. HEAD is now `0f4ca85`, and nothing has been pushed.
 
-- **Летсплей.** Ролики сортируются только по просмотрам; для каждого по очереди субтитры, затем Whisper, затем
-  следующий ролик. LLM сначала отвечает, звучит ли голос автора, и приводит его дословные цитаты; цитаты сверяются
-  с текстом, без них ролик пропускается. Тексты без речи автора отсекаются до LLM, из субтитров убирается шум
-  вроде `[bell]` и «Heat. Heat. Heat.». Без расшифровки LLM только пересказывает описание ролика. Более слабый
-  результат повторной проверки не заменяет сохранённый, пустая страница поиска без `videoRenderer` считается сменой
-  формата. Демо и ранний доступ уходят в конец списка, трейлеры переизданий требуют слов издания и свежей даты.
-- **Выборка, поиск, похожие игры.** Запуск, закончивший блок New Releases, добирает пачку из SEE ALL. Поиск по
-  словам без учёта знаков препинания («dragons dogma», «warhammer 40000»). Родственные жанры дают слабое сходство,
-  слабые совпадения показаны отдельно.
-- **Интерфейс.** HTML-страницы ошибок, источник и длительность запусков на мониторинге, понятный курсор дня,
-  живой обратный отсчёт, русские подписи шагов и журнал без внутренних полей, исправленная мобильная вёрстка
-  таблицы платформ, честные пустые состояния.
-- **Безопасность и деплой.** `RUN_TOKEN` защищает и `POST /run` (кроме кнопки на странице), поток SSE
-  ограничен по времени, uvicorn с `--timeout-graceful-shutdown`, `chown` не идёт по символическим ссылкам,
-  базовый образ закреплён по digest, Whisper сам выключается или берёт `tiny` при малом лимите памяти,
-  остатки идентификаторов посетителя убраны из образцов и из истории git.
-- **README** переписан: результат, проверка за пять минут, требования и где их смотреть, ключевые решения,
-  скриншоты, таблица живого прогона; замеры Whisper и защита вынесены в `docs/STT.md` и `docs/SECURITY.md`.
+**Commits (new hashes):**
+- A = `71740c1`: redact the remaining visitor ids in the YouTube samples
+- B = `7fa6fe2`: let's plays (pick by views, require the blogger's own commentary, no invented opinions), trailers, YouTube schema check, Russian logs
+- C = `37b4cab`: selection, search, similar games, data migration v5
+- D = `1762d29`: web pages, monitor, card, `RUN_TOKEN`, SSE lifetime, Whisper memory check
+- E = `7cda312`: graceful shutdown, symlink-safe chown, `.env` loading, pinned base image, restart policy
+- F = `db8957c`: card polish (exact skip reasons, phone-width platforms table)
+- G = `0f4ca85`: README, live-run table, screenshots, `docs/ai-log`, `docs/STT.md`, `docs/SECURITY.md`
 
-Живой прогон на чистой базе с настройками по умолчанию: 5 запусков по 20 игр (New Releases, затем страницы
-SEE ALL 1–4), 100 игр, 0 ошибок, все резюме через LLM, 52 заключения по речи блогера. Тестов: 225, все зелёные.
+**Live run.** Fresh database, default settings, Whisper `base`. The first run was started by the scheduler. Runs 2–5 were started through the button endpoint after each 5-minute pause, by a polling driver rather than a person clicking.
 
-Не сделано по правилам задания: деплой и публикация репозитория (агентам запрещено); ссылки на работающий сервис
-и репозиторий добавляются в README после этих шагов.
+| Run | Source | Games | Time | Errors |
+|---|---|---|---|---|
+| 1 | New Releases | 20 | 28 min 04 s | 0 |
+| 2 | SEE ALL p1 | 20 | 9 min 03 s | 0 |
+| 3 | SEE ALL p1–p2 | 20 | 10 min 55 s | 0 |
+| 4 | SEE ALL p2–p3 | 20 | 3 min 03 s | 0 |
+| 5 | SEE ALL p3–p4 | 20 | 4 min 38 s | 0 |
+
+- After run 5 the day state shows New Releases done and the SEE ALL cursor at 72.
+- Page 1 was taken twice because every game on it came out that day, and Metacritic reorders games with the same date between requests. No game was processed twice.
+- Runs 2–5 picked up games released that same day. Most have no reviews yet, so only 22 of the 100 have critic reviews and 13 have user reviews. All of those got LLM summaries, with no LLM failures.
+- Let's plays: 52 conclusions from captions, 8 description retellings, 40 games with no suitable video.
+- 17 videos were skipped for having no commentary from the blogger, including the Kingdom Hearts walkthrough the reviewers flagged. Whisper ran 9 times and each time found gameplay with no voice.
+- 94 of 100 games have strong similar-game matches.
+- The 100-game database is now the local demo at `data/games.db` (git-ignored).
+
+**Per problem**
+
+*Requirements lens*
+1. Deploy and live URL: not done, deploying is forbidden for agents. The Railway steps, a memory step and a YouTube-blocking step are in the README. (D, E, G)
+2. AI chat log: fixed. `docs/ai-log/` holds each agent's verbatim prompt and final answer, an action list without tool output, and the two orchestration scripts. Private notes, unrelated messages, paths, the IP and visitor ids are removed. (G)
+3. Repository and IP in history: history rewritten and verified (0 hits for the IP or visitor ids in any commit, old objects pruned). Pushing is forbidden for agents.
+4. Invented let's play conclusions: fixed. The prompt now asks for `has_commentary` plus verbatim quotes, quotes are checked against the transcript, a text pre-filter drops dialogue- or music-only transcripts, caption noise is stripped, and pros/cons about the author or the video are dropped. I tested it on four real transcripts before the live run. (B)
+5. SEE ALL never run live: fixed, see the table above. (G)
+6. Similar games mostly empty: fixed with related-genre families and a separate "слабое сходство" list, plus the 100-game database. (C)
+7. Description-based conclusion shown as the blogger's opinion: fixed. A separate retelling prompt is used, the card says «речь блогера не расшифрована», and a migration resets old records. (B, C, D)
+8. English bullets passing the Russian check: fixed, the check now runs per item, and a migration resets bad stored summaries for recompute. (B, C)
+9. Wrong trailer for re-releases: fixed. Edition words are required, `~` is a subtitle separator, recent trailers are preferred, and a base-game fallback is labelled. (B)
+10. Demo videos chosen for released games: fixed, demo and early-access videos rank last once the game is out. (B)
+11. Search misses: fixed, punctuation is ignored, every word must match, and a migration recomputes stored keys. (C)
+12. Early return after New Releases: fixed, the batch fills from SEE ALL, and the test was updated. (C)
+13. "10 минут" note: fixed, it says 20 minutes or explains the strict title check. (B)
+
+*Code lens*
+
+14. Duplicate of 1 and 2.
+15. Duplicate of 3; commit 3b3f3e6 is covered too.
+16. Refresh overwriting good data: fixed, a worse result keeps the stored let's play or trailer, and old unverified conclusions count as replaceable. (B, C)
+17. Most popular video skipped: fixed, ranking is by views only and each video goes captions → Whisper → next. The card lists the skipped videos and why. (B, D, F)
+18. Same as 7.
+19. Missing `videoRenderer` read as no results: fixed, it is now a schema error, and real "no results" pages are recognised from a live sample. (B)
+20. SSE blocking shutdown: fixed with `--timeout-graceful-shutdown 5` and a 10-minute stream limit. (D, E)
+21. `RUN_TOKEN` bypass: fixed, `/run` needs the token unless the request carries `Sec-Fetch-Site: same-origin`. (D)
+22. Whisper out-of-memory: fixed, the service reads the cgroup memory limit, switches to `tiny` under 1.5 GB and turns Whisper off under 1.1 GB. (D)
+23. Test that checked nothing: fixed, it now goes through the database. (C)
+24. Dead code: removed. (B)
+
+*UX lens*
+
+25. Duplicate of 1 and 2 (README «Результат» section added).
+26. Fixed, including the review prompt («только свойства игры»).
+27. Same as 6.
+28. Raw JSON error pages: fixed, HTML pages for 404/422/500 and clamped paging. (D)
+29. Monitor missing sources and durations: fixed, plus a readable day cursor and labelled sources in the card footer. (D)
+30. README hard to skim: restructured, with 3 screenshots, `docs/STT.md` and `docs/SECURITY.md`. (G)
+31. Same as 13.
+32. Frozen cooldown hint and hour formatting: fixed. (D)
+33. English logs, absolute DB path, `owner` field, raw trigger code: fixed. (B, D)
+34. Same as 11.
+35. Same as 9.
+36. Technical text in notes and the errors table: fixed, mapped to plain Russian. (B, D)
+37. Platforms table on phones: fixed and checked at 390 px; hero Userscore count and «мало для Userscore» added. (D, F)
+38. Empty page past the end and missing plural: fixed. (D)
+39. Misleading empty and disabled states: fixed. (D)
+40. CSS issues: fixed. (D)
+41. `.env` ignored: fixed, `app/serve.py` loads it, and the README says so. (E, G)
+42. Diagram misaligned: fixed. (G)
+
+*Security lens*
+
+43. Duplicate of 1 and 2; the exported logs were scrubbed and grep-checked.
+44. Same as 3. Commit emails are still mixed between your two addresses; I left that to you.
+45. Whisper memory on Railway: fixed, plus restart policy ALWAYS and a README step. (D, E)
+46. chown following symlinks: fixed and tested. (E)
+47. `datasyncId`, `rolloutToken`, `appInstallData` and `XSRF_TOKEN` left in samples: redacted. (A)
+48. Floating base image: pinned to `python:3.12.15-slim-trixie@sha256:a6e34c59…`, digest verified against the registry. (E)
+
+No false alarms: every finding was real.
+
+**What you need to do before submitting:**
+- Deploy to Railway and push to GitHub, then put both links into README.md lines 9–11.
+- Read `docs/ai-log/` once before publishing it.
+- The exporter is at `[scratchpad]/ailog/export_ai_log.py`. Usage: `<subagents/workflows dir> <out dir> <scripts dir>`. Rerun it to add this stage's real final answer; the log currently uses a summary I wrote from the commits.
+
+Files are in `~/dev/skytec-metacritic`:
+- `README.md`
+- `docs/ai-log/README.md`
+- `docs/STT.md`
+- `docs/SECURITY.md`
+- `docs/screenshots/`
 
 ## Ход работы
 
@@ -424,7 +501,7 @@ SEE ALL 1–4), 100 игр, 0 ошибок, все резюме через LLM, 
 - `Bash` Find recently modified SQLite databases
 - `Bash` Inspect scratchpad databases from earlier reviews
 - `Bash` Inspect let's play records in the proof database
-- `Read` <внешний диск>
+- `Read` [внешний диск]
 - `Bash` List project transcript directories
 - `Bash` List workflow and subagent transcripts for skytec
 - `Bash` Inspect workflow records mentioning skytec
@@ -507,7 +584,7 @@ SEE ALL 1–4), 100 игр, 0 ошибок, все резюме через LLM, 
 - `Bash` Check headless Chrome screenshot progress
 - `Bash` Write a screenshot helper with a hard timeout and test it
 - `Bash` Retake the card screenshot and time it
-- `Read` <scratchpad>/check/game-kh.png
+- `Read` [scratchpad]/check/game-kh.png
 - `Bash` Treat unverified old conclusions as replaceable and queue them for refresh
 - `Bash` Test replacement of unverified old let's play conclusions
 - `Bash` Show assertion details for the new test
@@ -553,14 +630,14 @@ SEE ALL 1–4), 100 игр, 0 ошибок, все резюме через LLM, 
 - `Bash` Retry the monitor screenshot with a fresh Chrome profile
 - `Bash` Check Node version and stop stray headless Chrome
 - `Bash` Take screenshots via the Chrome DevTools protocol
-- `Read` <scratchpad>/check/monitor-live.png
+- `Read` [scratchpad]/check/monitor-live.png
 - `Bash` Print missing scores as «нет» in the run log
 - `Bash` Take a mobile screenshot of a game card
 - `Bash` Split the tall mobile screenshot into two halves
-- `Read` <scratchpad>/check/vm-top.png
+- `Read` [scratchpad]/check/vm-top.png
 - `Bash` Stack score cells on phones so the platforms table fits
 - `Bash` Screenshot the top of the card at phone width
-- `Read` <scratchpad>/check/vm-m1.png
+- `Read` [scratchpad]/check/vm-m1.png
 - `Bash` Check live run progress and trailer choices
 - `Bash` Dry-run the history rewrite in a throwaway clone
 - `Bash` Search tracked files for personal data
@@ -585,10 +662,10 @@ SEE ALL 1–4), 100 игр, 0 ошибок, все резюме через LLM, 
 - `Bash` Compute totals for the 100-game live database
 - `Bash` Save the live DB as the local demo DB and serve a copy for screenshots
 - `Bash` Capture the list and card screenshots from the 100-game DB
-- `Read` <scratchpad>/check/card.png
+- `Read` [scratchpad]/check/card.png
 - `Bash` Convert screenshots to JPEG into docs/screenshots
 - `Bash` Check the current time
-- `Read` <scratchpad>/check/list-small.jpg
+- `Read` [scratchpad]/check/list-small.jpg
 - `Bash` Retake the list screenshot with the scheduler on but no run due, then stop
 - `Bash` Fill the README live-run section and fix screenshot names
 - `Bash` Verify the README claims about skipped videos
@@ -601,5 +678,13 @@ SEE ALL 1–4), 100 игр, 0 ошибок, все резюме через LLM, 
 - `Bash` Scrub escaped forms of the IP and re-verify
 - `Bash` Scan the export for tokens and visitor ids
 - `Bash` Scrub the visitor ids from the review text and re-export
+- `Bash` Spot-check exported AI log files
+- `Bash` Add the AI log, docs and screenshots and commit
+- `Bash` Check refs and back up the repo before rewriting history
+- `Bash` Rewrite history to drop identifiers and verify the result
+- `Bash` Confirm the old commits are gone and history is clean
+- `Bash` Clean up temp artifacts, run the final suite, confirm ports free
+- `Bash` Remove the scratch survey of private messages and list final commits
+> All 48 findings are handled except two that need you: deploying the service and pushing the repository. The rules forbid both for agents, so the README says the links will be added after those steps. 225 tests pass, and nothing is listening on 87xx or 8000. History was rewritten locally with `git fi
 
 </details>
