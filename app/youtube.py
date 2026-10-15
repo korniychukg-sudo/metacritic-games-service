@@ -367,9 +367,16 @@ def parse_search_html(html_text: str) -> list[VideoCandidate]:
                 live=live,
             )
         )
-    if renderers == 0 and not has_no_results_marker(data):
+    if renderers == 0 and not has_no_results_marker(data) and estimated_results(data) != 0:
         raise SchemaError("на странице поиска YouTube нет videoRenderer (сменился формат выдачи)")
     return out
+
+
+def estimated_results(data: dict) -> int | None:
+    try:
+        return int(str(data.get("estimatedResults")))
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_watch_html(html_text: str) -> dict | None:

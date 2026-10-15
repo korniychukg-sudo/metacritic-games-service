@@ -554,3 +554,16 @@ def test_trailer_owner_matching_handles_joined_names_and_game_channels():
                            owners=["Codename Entertainment"]) is None
     hub = _trailer("Forever Ago - Official Launch Trailer", "Gamebonk Trailers")
     assert trailer_problem("Forever Ago", hub, "2026-10-14", today, owners=["Third Shift"]) is None
+
+
+def test_empty_search_with_zero_estimate_is_not_a_format_change():
+    import json as _json
+    page = "<script>var ytInitialData = " + _json.dumps({"estimatedResults": "0", "contents": {}}) + ";</script>"
+    assert parse_search_html(page) == []
+    broken = "<script>var ytInitialData = " + _json.dumps({"estimatedResults": "5400", "contents": {}}) + ";</script>"
+    try:
+        parse_search_html(broken)
+    except Exception as exc:
+        assert "videoRenderer" in str(exc)
+    else:
+        raise AssertionError("a page with results but no videoRenderer must raise")
