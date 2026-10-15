@@ -147,6 +147,7 @@ def test_letsplay_validator_drops_items_about_the_video_and_unverified_quotes():
              "pros": ["Позитивный настрой и энтузиазм автора", "Красивые арены", "Подробный обзор в видео"],
              "cons": ["Не указаны конкретные проблемы", "Отсутствие подробного обзора", "Долгие загрузки"],
              "verdict": "Хорошая коллекция."}
+    value["evidence"][0] = '"' + value["evidence"][0] + '"'
     out = validate_letsplay_json(value, KH_EXCERPT)
     assert out["pros"] == ["Красивые арены"] and out["cons"] == ["Долгие загрузки"]
     assert out["evidence"] == ["Of course I have. Long ago, keyblade wielders waged a war"]

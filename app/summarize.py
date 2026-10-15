@@ -372,7 +372,8 @@ def validate_letsplay_json(value: dict, text: str | None = None) -> dict:
     pros = about_the_game(_str_list(value.get("pros") or value.get("likes")))
     cons = about_the_game(_str_list(value.get("cons") or value.get("dislikes")))
     verdict = str(value.get("verdict") or "").strip()
-    raw_evidence = _str_list(value.get("evidence") or value.get("quotes"), limit=4)
+    raw_evidence = [q.strip('"«»“”\' ').strip() for q in _str_list(value.get("evidence") or value.get("quotes"), limit=4)]
+    raw_evidence = [q for q in raw_evidence if q]
     evidence = verified_quotes(raw_evidence, text)
     has_commentary = _flag(value.get("has_commentary", True)) and bool(evidence)
     if not has_commentary:

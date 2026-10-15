@@ -383,8 +383,9 @@ class Pipeline:
         prev = stored or {}
         is_new = self.db.upsert_game(game, source)
         log.info("%s %s: платформ %d, Metascore %s, Userscore %s, отзывов %d+%d",
-                 "Добавлена" if is_new else "Обновлена", game.slug, len(game.platforms), game.metascore,
-                 game.userscore, len(game.critic_reviews), len(game.user_reviews))
+                 "Добавлена" if is_new else "Обновлена", game.slug, len(game.platforms),
+                 "нет" if game.metascore is None else game.metascore,
+                 "нет" if game.userscore is None else game.userscore, len(game.critic_reviews), len(game.user_reviews))
 
         for kind, reviews, total, column in (
             ("critic", game.critic_reviews, game.critic_total, "critic_summary"),

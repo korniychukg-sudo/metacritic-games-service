@@ -128,7 +128,7 @@
           {% if lp.summary %}<p class="lp-summary">{{ lp.summary }}</p>{% endif %}
           {% if lp.pros %}<h3>Понравилось блогеру</h3><ul class="points likes">{% for x in lp.pros %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
           {% if lp.cons %}<h3>Не понравилось блогеру</h3><ul class="points dislikes">{% for x in lp.cons %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
-          {% if lp.evidence %}<h3>Слова блогера, на которых основано заключение</h3><ul class="quotes evidence">{% for x in lp.evidence %}<li>«{{ x }}»</li>{% endfor %}</ul>{% endif %}
+          {% if lp.evidence %}<h3>Слова блогера, на которых основано заключение</h3><ul class="quotes evidence">{% for x in lp.evidence %}<li>«{{ x.strip('"«»“”') }}»</li>{% endfor %}</ul>{% endif %}
           {% if lp.llm_no_commentary %}<p class="small"><span class="badge warn">LLM не нашла в расшифровке оценок блогера, ниже фразы из неё; летсплей будет найден заново</span></p>{% endif %}
           {% if not lp.summary and not lp.pros and not lp.cons %}<p class="muted">{{ lp.note or 'Заключение построить не удалось.' }} Ссылка на ролик сохранена.</p>{% endif %}
         {% endif %}

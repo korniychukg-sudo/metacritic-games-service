@@ -363,6 +363,13 @@ def test_card_says_when_the_text_comes_from_whisper(settings):
         html = client.get("/game/over-the-hill").text
         assert "Более популярные пропущены:" in html
         assert "«Big Video» (2 050 просмотров): в ролике нет комментариев блогера" in html
+        lp["passed_over"] = [{"video_id": "oiVbvxSoNZI", "title": "Big Video", "views": 2050,
+                              "reason": "субтитров нет, речь не распознана"}]
+        lp["checked"] = [{"video_id": "oiVbvxSoNZI", "reason": "автор отключил субтитры"}]
+        lp["stt_checked"] = [{"video_id": "oiVbvxSoNZI", "reason": "в аудио почти нет речи"}]
+        pipeline.db.set_json(pipeline.db.get_game(slug="over-the-hill")["id"], "letsplay", lp)
+        html = client.get("/game/over-the-hill").text
+        assert "субтитры: автор отключил субтитры; Whisper: в аудио почти нет речи" in html
 
 
 def test_monitor_shows_the_speech_worker_state(settings, monkeypatch):

@@ -33,7 +33,7 @@ from .youtube import VIDEO_ID, YouTubeClient
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PAGE_SIZE = 24
 MAX_PAGE = 10000
-STATIC_VERSION = "7"
+STATIC_VERSION = "8"
 SSE_MAX_SECONDS = 600
 API_PREFIXES = ("/api/", "/docs", "/redoc", "/openapi.json", "/healthz", "/static/")
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
@@ -402,6 +402,18 @@ def token_ok(request: Request, token: str) -> bool:
     return bool(given) and hmac.compare_digest(given.encode(), token.encode())
 
 
+def skip_reason(item: dict, lp: dict) -> str:
+    if item.get("reason") != "субтитров нет, речь не распознана":
+        return item.get("reason") or ""
+    vid = item.get("video_id")
+    captions = [c["reason"] for c in lp.get("checked") or [] if c.get("video_id") == vid]
+    speech = [n["reason"] for n in lp.get("stt_checked") or [] if n.get("video_id") == vid]
+    parts = [f"субтитры: {captions[0]}"] if captions else []
+    if speech:
+        parts.append(f"Whisper: {speech[0]}")
+    return "; ".join(parts) or item["reason"]
+
+
 def video_info(g: dict) -> dict | None:
     embed = safe_url(g.get("video_embed_url"))
     if embed:
@@ -557,6 +569,9 @@ def create_app(s: Settings | None = None, pipeline: Pipeline | None = None, star
         g["similar_games"] = [{**briefs[x["id"]], "score": x["score"], "reasons": x.get("reasons", []),
                                "weak": bool(x.get("weak"))}
                               for x in sim if x["id"] in briefs]
+        lp = g.get("letsplay")
+        if isinstance(lp, dict) and lp.get("passed_over"):
+            lp["passed_over"] = [{**item, "reason": skip_reason(item, lp)} for item in lp["passed_over"]]
         g["metacritic_url"] = f"https://www.metacritic.com/game/{g['slug']}/"
         g["video"] = video_info(g)
         g["video_url"] = g["video"]["url"] if g["video"] else None
