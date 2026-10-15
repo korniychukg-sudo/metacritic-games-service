@@ -176,14 +176,14 @@ class FakeYouTube:
             c.title = f"{title} - {c.title}"
         return ranked
 
-    def find_trailer(self, title, release_date=None):
+    def find_trailer(self, title, release_date=None, owners=None):
         self.trailer_searches += 1
         if self.blocked:
             raise YouTubeBlocked("YouTube показал капчу")
         if self.no_trailer:
             return None
         return VideoCandidate("TrAiLeR0001", f"{title} - Official Trailer", views=1000, length_seconds=120,
-                              channel="Publisher")
+                              channel="IGN")
 
     def transcript(self, video_id):
         self.transcript_calls += 1

@@ -507,3 +507,50 @@ def test_trailers_must_name_the_game_on_its_own_and_be_recent():
         assert trailer_problem(game, c, "2026-10-15", today) is not None, (game, c.title)
     for game, c in right:
         assert trailer_problem(game, c, "2026-10-15", today) is None, (game, c.title)
+
+
+def _trailer(title, channel, description="", views=5000, length=90):
+    from app.youtube import VideoCandidate
+
+    return VideoCandidate(video_id="abcdefghijk", title=title, views=views, length_seconds=length,
+                          channel=channel, description=description, published_date="2026-09-01")
+
+
+def test_trailer_from_unrelated_channel_is_rejected():
+    from datetime import date
+    from app.youtube import trailer_problem
+    today = date(2026, 10, 15)
+    film = _trailer("Pestilence | Official Trailer (2026)", "Manuel Rini",
+                    "Valerio and Viola are a couple navigating the struggles of their relationship.")
+    assert trailer_problem("Pestilence", film, "2026-10-14", today, owners=["Kooky Studios"]) is not None
+    app_trailer = _trailer("Fossil Digger by PIJI - Official Trailer | PIJI App Game", "PIJI App",
+                           "Help Ben, a paleontologist, retrieve fossils")
+    assert trailer_problem("Fossil Digger", app_trailer, "2026-10-14", today, owners=["Yagni Lab"]) is not None
+
+
+def test_trailer_owned_by_developer_aggregator_or_store_link_is_kept():
+    from datetime import date
+    from app.youtube import trailer_problem
+    today = date(2026, 10, 15)
+    dev = _trailer("Pestilence - Official Trailer", "Kooky Studios")
+    assert trailer_problem("Pestilence", dev, "2026-10-14", today, owners=["Kooky Studios"]) is None
+    ign = _trailer("Pestilence - Official Launch Trailer", "IGN")
+    assert trailer_problem("Pestilence", ign, "2026-10-14", today, owners=["Kooky Studios"]) is None
+    store = _trailer("Pestilence Official Trailer", "Some Uploader",
+                     "Wishlist now: https://store.steampowered.com/app/123/Pestilence/")
+    assert trailer_problem("Pestilence", store, "2026-10-14", today, owners=["Kooky Studios"]) is None
+    assert trailer_problem("Pestilence", _trailer("Pestilence Official Trailer", "Some Uploader"),
+                           "2026-10-14", today) is None
+
+
+def test_trailer_owner_matching_handles_joined_names_and_game_channels():
+    from datetime import date
+    from app.youtube import trailer_problem
+    today = date(2026, 10, 15)
+    joined = _trailer("Meat and Flowers | Horror Indie game Reveal Trailer", "LousyPossumGames")
+    assert trailer_problem("MEAT AND FLOWERS", joined, "2026-10-14", today, owners=["Lousy Possum Games"]) is None
+    own = _trailer("Folded Fables: Tidy Up The Dragon Hoard - Official Trailer", "Folded Fables")
+    assert trailer_problem("Folded Fables: Tidy Up The Dragon Hoard", own, "2026-10-14", today,
+                           owners=["Codename Entertainment"]) is None
+    hub = _trailer("Forever Ago - Official Launch Trailer", "Gamebonk Trailers")
+    assert trailer_problem("Forever Ago", hub, "2026-10-14", today, owners=["Third Shift"]) is None

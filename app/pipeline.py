@@ -502,13 +502,18 @@ class Pipeline:
             return self._due(old, timedelta(hours=s.letsplay_retry_hours))
         return self._due(old, timedelta(days=s.trailer_refresh_days))
 
-    def trailer_still_ok(self, title: str, old: dict | None, anchor: str | None) -> bool:
+    def game_owners(self, game_id: int) -> list[str]:
+        g = self.db.get_game(game_id=game_id) or {}
+        return list(g.get("developers") or []) + list(g.get("publishers") or [])
+
+    def trailer_still_ok(self, title: str, old: dict | None, anchor: str | None,
+                         owners: list[str] | None = None) -> bool:
         if not old or old.get("status") != "ok" or not old.get("video"):
             return False
         video = old["video"]
         ref = parse_day(old.get("updated_at")) or self.today()
         return trailer_problem(title, stored_candidate(video), anchor, ref,
-                               strict_edition=not video.get("base_game")) is None
+                               strict_edition=not video.get("base_game"), owners=owners) is None
 
     def ensure_trailer(self, game_id: int, slug: str, title: str, anchor: str | None, has_video: bool,
                        old: dict | None, run_id: int | None, day: str) -> None:
@@ -523,9 +528,10 @@ class Pipeline:
             return
         self._step("YouTube: трейлер", title)
         now = iso(self.clock())
-        keep = self.trailer_still_ok(title, old, anchor)
+        owners = self.game_owners(game_id)
+        keep = self.trailer_still_ok(title, old, anchor, owners)
         try:
-            cand = finder(title, anchor)
+            cand = finder(title, anchor, owners=owners)
         except Exception as exc:
             log.warning("Трейлер для %s: ошибка поиска: %s", slug, exc)
             if keep:

@@ -76,6 +76,17 @@ FILM_CHANNEL = re.compile(r"\b(movies?|films?|cinema|movieclips|кино)\b", re
 REACTION = re.compile(r"\breaction\b|реакция", re.I)
 LETSPLAY_WINDOW_DAYS = 365
 TRAILER_WINDOW_DAYS = 3 * 365
+TRAILER_AGGREGATORS = {
+    "ign", "gamespot", "gametrailers", "game trailers games explorer", "indie game radar", "playstation",
+    "xbox", "nintendo of america", "nintendo", "steam", "gamesradar", "pc gamer", "polygon", "the game awards",
+    "rock paper shotgun", "gameranx", "gamespot trailers", "ign india", "kotaku", "igromania", "stopgame ru",
+    "gamegrin", "indie games", "epic games store", "gog com", "upcoming games", "trailer park", "indiegame trailers",
+    "indie games hub", "next indie", "ultimate game database", "gametikker", "games explorer",
+}
+STORE_LINK = re.compile(r"(store\.steampowered\.com|steamcommunity\.com|store\.epicgames\.com|gog\.com|"
+                        r"store\.playstation\.com|playstation\.com|xbox\.com|nintendo\.com|itch\.io)", re.I)
+OWNER_STOP = {"inc", "ltd", "llc", "games", "game", "studio", "studios", "entertainment", "interactive", "co",
+              "corp", "corporation", "limited", "gmbh", "sa", "s", "a", "the", "digital", "publishing", "software"}
 
 
 @dataclass
@@ -449,7 +460,8 @@ def recheck_letsplay(game_title: str, cand: VideoCandidate, release_date: str | 
 
 
 def trailer_problem(game_title: str, cand: VideoCandidate, release_date: str | None, today: date,
-                    strict_edition: bool = True, max_seconds: int = 600) -> str | None:
+                    strict_edition: bool = True, max_seconds: int = 600,
+                    owners: list[str] | None = None) -> str | None:
     if cand.live or cand.views is None:
         return "трансляция или нет просмотров"
     if cand.length_seconds is None or not 20 <= cand.length_seconds <= max_seconds:
@@ -465,15 +477,46 @@ def trailer_problem(game_title: str, cand: VideoCandidate, release_date: str | N
             return "в названии нет слов издания"
         if published_too_early(cand, release_date, today, TRAILER_WINDOW_DAYS):
             return "трейлер опубликован больше чем за три года до выхода игры"
+    if owners is not None and not trailer_owned(cand, owners, game_title):
+        return "ролик выложил не разработчик, не издатель и не игровой канал"
     return None
+
+
+def owner_words(name: str) -> set[str]:
+    return {w for w in normalize(name).split() if w not in OWNER_STOP and len(w) > 1}
+
+
+def trailer_owned(cand: VideoCandidate, owners: list[str], game_title: str = "") -> bool:
+    channel = normalize(cand.channel or "")
+    if not channel:
+        return bool(cand.description and STORE_LINK.search(cand.description))
+    if channel in TRAILER_AGGREGATORS or re.search(r"\btrailers?\b", channel):
+        return True
+    channel_words = set(channel.split())
+    squashed = channel.replace(" ", "")
+    title_words = set(phrase_words(game_title))
+    if title_words and channel_words - OWNER_STOP - {"official"} and \
+            (channel_words - OWNER_STOP - {"official"}) <= title_words:
+        return True
+    desc_words = set(normalize(cand.description or "").split())
+    for owner in owners or []:
+        words = owner_words(owner)
+        if not words:
+            continue
+        if words <= channel_words or "".join(sorted(words, key=normalize(owner).find)) in squashed:
+            return True
+        if words <= desc_words:
+            return True
+    return bool(cand.description and STORE_LINK.search(cand.description))
 
 
 def rank_trailers(game_title: str, candidates: list[VideoCandidate], max_seconds: int = 600,
                   release_date: str | None = None, today: date | None = None,
-                  strict_edition: bool = True) -> list[VideoCandidate]:
+                  strict_edition: bool = True, owners: list[str] | None = None) -> list[VideoCandidate]:
     today = today or date.today()
     eligible = [c for c in candidates
-                if trailer_problem(game_title, c, release_date, today, strict_edition, max_seconds) is None]
+                if trailer_problem(game_title, c, release_date, today, strict_edition, max_seconds,
+                                   owners=owners) is None]
     return sorted(eligible, key=lambda c: (not bool(OFFICIAL.search(c.title)), -(c.views or 0)))
 
 
@@ -639,15 +682,17 @@ class YouTubeClient:
         self.last_stats = stats
         return sort_letsplays(kept, released) + tail
 
-    def find_trailer(self, game_title: str, release_date: str | None = None) -> VideoCandidate | None:
+    def find_trailer(self, game_title: str, release_date: str | None = None,
+                     owners: list[str] | None = None) -> VideoCandidate | None:
         found = self.search(f"{game_title} official trailer", sp=None)
         today = self.today()
-        ranked = rank_trailers(game_title, found, release_date=release_date, today=today)
+        ranked = rank_trailers(game_title, found, release_date=release_date, today=today, owners=owners)
         if ranked:
             return ranked[0]
         if not edition_words(game_title):
             return None
-        relaxed = rank_trailers(game_title, found, release_date=release_date, today=today, strict_edition=False)
+        relaxed = rank_trailers(game_title, found, release_date=release_date, today=today, strict_edition=False,
+                                owners=owners)
         if relaxed:
             relaxed[0].base_game = True
             return relaxed[0]
