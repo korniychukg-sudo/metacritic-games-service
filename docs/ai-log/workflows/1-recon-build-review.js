@@ -1,3 +1,6 @@
+// Первый оркестратор. Этапы Recon, Build и review:code завершились; review:requirements остановлен
+// вручную, когда агент начал ждать следующего часового запуска в реальном времени. Этап Fix этого скрипта
+// не запускался: исправления выполнил второй оркестратор (2-fix-speech-review-repair.js).
 export const meta = {
   name: 'skytec-metacritic-test',
   description: 'Build the Metacritic games service test task: recon, build, two reviews, fixes',
@@ -85,12 +88,6 @@ ${rq}
 CODE REVIEW:
 ${cr}
 
-TASK: time matters, the candidate is waiting; aim to finish within about 45 minutes of work. Verify each finding first and skip false alarms with a note.
-Fix in this order:
-1) every requirements-review gap that breaks a stated requirement of the test task;
-2) code review P1 items 1-3: drop VOLUME from the Dockerfile and document a Railway volume at /data; protect the force-run endpoints with a cooldown of about 5 minutes after the last run ends plus a same-origin check, answering 429 with Retry-After and showing the remaining time on the button, so reviewers can still press it; treat Pollinations 402 as a rate limit with backoff instead of shrinking prompts, restore the prompt budget after a success, switch to the quote-based summary for the rest of the run after about 3 LLM failures in a row, and stop taking new games after about 50 minutes;
-3) code review P2 items 4, 5, 7, 8, 9 and the quick ones 11, 13 (--forwarded-allow-ips), 14, 15, 18, plus tzdata in requirements.
-Put anything you skip into the README limitations. Keep tests green and add tests for the fixed logic.
-Smoke test: a fresh local end-to-end run with BATCH_SIZE=5 against live Metacritic (not 20; the free LLM makes 20 take 40 minutes), then check the list, card and monitoring pages respond. Update the README requirements checklist with honest status. Commit. Return: list of fixes, skipped items, final test results, smoke-run numbers (games processed, summaries by LLM vs fallback, let's plays found), and the exact local commands to run it.`, { label: 'fix', phase: 'Fix' })
+TASK: fix every real defect (verify each first, skip false alarms with a note). Keep tests green and add tests for fixed logic. Run a fresh local end-to-end processing run of 20 games against live Metacritic and confirm the UI and monitoring work. Update README (requirements checklist with honest status, limitations). Commit. Return: list of fixes, final test results, final smoke-run numbers (games processed, summaries by LLM vs fallback, let's plays found), and the exact local commands to run it.`, { label: 'fix', phase: 'Fix' })
 
 return { recon, build, rq, cr, fixed }

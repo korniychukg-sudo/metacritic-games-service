@@ -1,3 +1,8 @@
+// Второй оркестратор (текст ТЗ, общие правила и текст code review подставлялись в константы TZ, RULES и CR,
+// здесь они опущены, их полный текст есть в промптах агентов в raw/). Выполнены: Fix, Speech, четыре ревью,
+// два круга repair/recheck. Третий круг и этап Live не запускались: конвейер остановлен после второй
+// перепроверки, живые прогоны на 100 играх уже были сделаны в первом круге исправлений, а последние правки
+// внесены в основной сессии Claude Code (см. README этой папки).
 
 const NOWAIT = `Never wait for the hourly scheduler in real wall-clock time: test scheduling and day-rollover logic with unit tests and injected clocks, or by calling the run function directly.`
 
