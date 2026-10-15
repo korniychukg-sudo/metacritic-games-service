@@ -322,3 +322,23 @@ def test_backfill_candidates_rotate_by_last_attempt(db):
     db.mark_backfill_attempt(1)
     order = [g["id"] for g in db.games_with_fallbacks(10)]
     assert order[-1] == 1 and set(order) == {1, 2, 3}
+
+
+def test_new_database_starts_from_the_seed_snapshot(tmp_path, monkeypatch):
+    from app.db import Database
+    seed = tmp_path / "seed.db"
+    src = Database(str(seed))
+    src.close()
+    monkeypatch.setenv("SEED_DB_PATH", str(seed))
+    target = tmp_path / "volume" / "games.db"
+    Database(str(target)).close()
+    assert target.exists() and target.read_bytes()[:16] == b"SQLite format 3\x00"
+    import sqlite3
+    con = sqlite3.connect(target)
+    con.execute("CREATE TABLE marker (x INTEGER)")
+    con.commit()
+    con.close()
+    Database(str(target)).close()
+    con = sqlite3.connect(target)
+    assert con.execute("SELECT count(*) FROM sqlite_master WHERE name='marker'").fetchone()[0] == 1
+    con.close()

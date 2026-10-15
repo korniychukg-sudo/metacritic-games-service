@@ -3,6 +3,7 @@ import logging
 import os
 import queue
 import re
+import shutil
 import sqlite3
 import threading
 import unicodedata
@@ -323,12 +324,27 @@ def migrate(conn: sqlite3.Connection) -> int:
     return conn.execute("PRAGMA user_version").fetchone()[0]
 
 
+SEED_DB_DEFAULT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "seed", "games.db")
+
+
+def seed_from_snapshot(path: str) -> bool:
+    seed = os.environ.get("SEED_DB_PATH", SEED_DB_DEFAULT)
+    if not seed or os.path.exists(path) or not os.path.isfile(seed):
+        return False
+    if os.path.abspath(seed) == os.path.abspath(path):
+        return False
+    shutil.copyfile(seed, path)
+    log.info("Новая база создана из снимка %s", seed)
+    return True
+
+
 class Database:
     def __init__(self, path: str, pool_size: int = 8):
         self.path = path
         self.memory = path == ":memory:"
         if not self.memory:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            seed_from_snapshot(path)
         self.pool_size = 1 if self.memory else max(1, pool_size)
         self._idle: queue.LifoQueue = queue.LifoQueue()
         self._slots = threading.BoundedSemaphore(self.pool_size)

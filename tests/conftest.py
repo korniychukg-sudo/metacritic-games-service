@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+os.environ["SEED_DB_PATH"] = ""
+
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLES = ROOT / "docs" / "samples"
 sys.path.insert(0, str(ROOT))
