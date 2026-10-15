@@ -281,6 +281,21 @@ def test_run_token_is_needed_everywhere_except_the_monitor_button(settings):
         assert client.get("/api/status").json()["manual"]["token_required_for_api"] is True
 
 
+def test_forged_fetch_metadata_skips_the_token_but_not_the_cooldown(settings):
+    settings.run_token = "s3cret"
+    settings.manual_cooldown_seconds = 300
+    client, pipeline, _ = client_with_data(settings, run=False, batch=1)
+    forged = {"Accept": "application/json", "Sec-Fetch-Site": "same-origin", "User-Agent": "curl/8.7.1"}
+    with client:
+        assert client.post("/run", headers={"Accept": "application/json"}).status_code == 401
+        assert client.post("/run", headers=forged).status_code == 202
+        wait_idle(pipeline)
+        r = client.post("/run", headers=forged)
+        assert r.status_code == 429 and r.json()["code"] == "cooldown" and int(r.headers["retry-after"]) > 0
+        r = client.post("/api/run", headers={"Authorization": "Bearer s3cret"})
+        assert r.status_code == 429
+
+
 def test_daily_cap_on_manual_runs(settings):
     settings.manual_daily_cap = 2
     client, pipeline, clock = client_with_data(settings, run=False)
@@ -397,6 +412,36 @@ def test_description_based_letsplay_is_not_presented_as_the_bloggers_opinion(set
         pipeline.db.set_json(pipeline.db.get_game(slug="over-the-hill")["id"], "letsplay", lp)
         html = client.get("/game/over-the-hill").text
         assert "выдуманный плюс" not in html and "выдуманный минус" not in html
+        assert "Ни субтитров, ни распознанной речи у подходящих роликов нет" in html
+
+
+def test_described_card_names_the_real_reason_and_lists_rejected_videos(settings):
+    from app.main import described_reason
+    from app.pipeline import NO_COMMENTARY_LLM, NO_COMMENTARY_TEXT, NO_TEXT, WRONG_GAME_LLM
+
+    client, pipeline, _ = client_with_data(settings, batch=1, yt=FakeYouTube(transcript_ok=False))
+    with client:
+        gid = pipeline.db.get_game(slug="over-the-hill")["id"]
+        lp = client.get("/api/games/over-the-hill").json()["letsplay"]
+        lp.update(skipped=[{"video_id": "a", "reason": NO_COMMENTARY_LLM}], checked=[],
+                  rejected=[{"video_id": "bGBXM6oxbag", "title": "GTA 5 #29 - Kradzież batyskafu",
+                             "reason": "в оригинальном названии ролика нет названия игры"}])
+        lp["video"]["search_title"] = "GTA 5 #29 - Theft of the bathyscaphe"
+        pipeline.db.set_json(gid, "letsplay", lp)
+        html = client.get("/game/over-the-hill").text
+        assert "нет комментариев блогера (только игра, диалоги или музыка)" in html
+        assert "Ни субтитров, ни распознанной речи" not in html
+        assert "Отброшенные ролики (1)" in html and "Kradzież" in html
+        assert "в поиске YouTube: «GTA 5 #29 - Theft of the bathyscaphe»" in html
+        pipeline.db.set_json(gid, "letsplay", {"status": "no_video", "method": "none", "note": "Проверим снова",
+                                               "rejected": lp["rejected"]})
+        html = client.get("/game/over-the-hill").text
+        assert "Проверим снова" in html and "Отброшенные ролики (1)" in html
+    assert described_reason({"skipped": [{"reason": NO_TEXT}, {"reason": NO_TEXT}]}).startswith(
+        "Ни субтитров, ни распознанной речи")
+    mixed = described_reason({"skipped": [{"reason": NO_TEXT}, {"reason": NO_COMMENTARY_TEXT},
+                                          {"reason": WRONG_GAME_LLM}]})
+    assert "у других нет комментариев блогера" in mixed and "ещё 1 ролик оказался о другой игре" in mixed
 
 
 def test_monitor_shows_sources_durations_and_hides_internal_fields(settings):

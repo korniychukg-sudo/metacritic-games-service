@@ -169,9 +169,12 @@ class FakeYouTube:
         if self.empty:
             self.last_stats = {"found": 0, "eligible": 0}
             return []
-        cands = [VideoCandidate(**{**c.__dict__, "queries": []}) for c in self.cands]
+        cands = [VideoCandidate(**{**c.__dict__, "queries": [], "refined": True}) for c in self.cands]
         self.last_stats = {}
-        return rank_candidates("Star Wars: Galactic Racer", cands, stats=self.last_stats)
+        ranked = rank_candidates("Star Wars: Galactic Racer", cands, stats=self.last_stats)
+        for c in ranked:
+            c.title = f"{title} - {c.title}"
+        return ranked
 
     def find_trailer(self, title, release_date=None):
         self.trailer_searches += 1
@@ -195,9 +198,10 @@ class FakeYouTube:
 class FakeLLM:
     model = "fake-model"
 
-    def __init__(self, fail=False, threshold=None, commentary=True):
+    def __init__(self, fail=False, threshold=None, commentary=True, about=True):
         self.fail = fail
         self.commentary = commentary
+        self.about = about
         self.threshold = threshold
         self.calls = 0
         self.enabled = True
@@ -234,16 +238,19 @@ class FakeLLM:
             raise LLMError("HTTP 503")
         prompt = messages[-1]["content"]
         self.prompts.append(prompt)
+        about = self.about(prompt) if callable(self.about) else self.about
         if '"has_commentary"' in prompt:
             commentary = self.commentary(prompt) if callable(self.commentary) else self.commentary
             body = prompt.split(":\n", 1)[1].split("\n\nСначала определи", 1)[0]
             quote = " ".join(body.replace("…", " ").split()[:9])
-            value = {"has_commentary": commentary, "evidence": [quote] if commentary else [],
+            value = {"played_game": "" if about else "Minecraft",
+                     "has_commentary": commentary, "evidence": [quote] if commentary else [],
                      "summary": "Автор ролика проходит первые гонки." if commentary else "",
                      "pros": ["скорость"] if commentary else [], "cons": ["сложность"] if commentary else [],
                      "verdict": "Автору понравилось." if commentary else ""}
         elif '"summary"' in prompt:
-            value = {"summary": "Судя по описанию ролика, в нём показаны первые гонки."}
+            value = {"played_game": "" if about else "Minecraft",
+                     "summary": "Судя по описанию ролика, в нём показаны первые гонки."}
         else:
             value = {"likes": ["красивые трассы"], "dislikes": ["нет сплит-скрина"], "verdict": "В целом хвалят."}
         return validator(value) if validator else value

@@ -294,26 +294,29 @@ LETSPLAY_SYSTEM = (
     "Игнорируй рекламу, спонсоров, просьбы подписаться. Не выдумывай."
 )
 LETSPLAY_TASK = (
-    "\n\nСначала определи, звучит ли в тексте голос самого автора ролика: он обращается к зрителям, рассказывает, "
-    "что делает, комментирует игру. Реплики персонажей игры, музыка и шум не считаются. Если голос автора есть, "
-    "has_commentary=true, а в evidence дай 2-3 короткие дословные цитаты автора на языке оригинала, лучше те, где "
-    "он оценивает игру. Затем только по словам автора: summary — как он оценивает игру и что в ней показывает "
-    "(2-4 предложения); pros и cons — только о самой игре (геймплей, сюжет, графика, техническое состояние, "
-    "контент) и только то, что сказал автор, иначе пустой список; не пиши про самого автора, его настрой, ролик "
-    "или полноту обзора. Если голоса автора нет, верни has_commentary=false и пустые поля. Все поля, кроме "
-    "evidence, пиши на русском языке. Ответь только JSON: "
-    '{"has_commentary": true, "evidence": ["..."], "summary": "...", "pros": ["..."], "cons": ["..."], '
-    '"verdict": "одно предложение"}'
+    "\n\nСначала определи: played_game — какую игру автор проходит в ролике, судя по тексту: название, как оно "
+    "звучит у автора или персонажей (сказал «welcome to Minecraft» — значит Minecraft), или пустая строка, если "
+    "название не звучит; сравнения с другими играми не в счёт. has_commentary — звучит ли голос "
+    "самого автора: он обращается к зрителям, комментирует игру (реплики персонажей, музыка и шум не в счёт). "
+    "Если голос есть, в evidence дай 2-3 короткие дословные цитаты автора на языке оригинала, лучше с оценкой игры, "
+    "и только по его словам: summary — как он оценивает игру и что показывает (2-4 предложения); pros и cons — "
+    "только о самой игре (геймплей, сюжет, графика, техническое состояние, контент) и только сказанное автором, "
+    "иначе пустой список; не про автора или ролик. Иначе верни пустые поля. Все поля, кроме evidence и "
+    "played_game, на русском. Ответь только JSON: "
+    '{"played_game": "", "has_commentary": true, "evidence": ["..."], "summary": "...", '
+    '"pros": ["..."], "cons": ["..."], "verdict": "одно предложение"}'
 )
 DESCRIPTION_SYSTEM = (
     "Ты кратко пересказываешь описания роликов YouTube об играх. По-русски, только по тексту описания. "
     "Не выдумывай."
 )
 DESCRIPTION_TASK = (
-    "\n\nЭто описание ролика, а не речь его автора. В 1-3 предложениях перескажи, что показано в ролике и что "
+    "\n\nЭто описание ролика, а не речь его автора. Сначала определи played_game — какой игре посвящён ролик "
+    "судя по названию и описанию, или пустая строка, если это неясно; упоминания других игр для сравнения не в "
+    "счёт. В summary в 1-3 предложениях перескажи, что показано в ролике и что "
     "известно об игре из описания. Не приписывай автору мнений об игре и не придумывай плюсы и минусы, пиши "
     "«судя по описанию ролика». Ссылки, рекламу и просьбы подписаться пропусти. Ответь только JSON на русском: "
-    '{"summary": "1-3 предложения"}'
+    '{"played_game": "", "summary": "1-3 предложения"}'
 )
 META_ITEM = re.compile(
     r"(?<![а-яё])(автор[а-яё]*|ролик[а-яё]*|видео(?![а-яё])|блогер[а-яё]*|ведущ(ий|его|ему|им|ем)(?![а-яё])"
@@ -336,6 +339,7 @@ def build_letsplay_prompt(game_title: str, video_title: str, channel: str | None
     else:
         system, task = DESCRIPTION_SYSTEM, DESCRIPTION_TASK
         head = f"Игра «{game_title}». Ролик «{video_title}»{by}. Описание ролика на YouTube:\n"
+    task = task.replace("{title}", game_title)
     available = max(300, max_chars - len(system) - len(head) - len(task))
     body = condense_transcript(text, available) if source in ("transcript", "whisper") else _clip(text, available)
     return [{"role": "system", "content": system}, {"role": "user", "content": head + body + task}]
@@ -363,11 +367,31 @@ def _flag(value) -> bool:
     return bool(value)
 
 
+def other_game(value: dict, game_title: str | None) -> str | None:
+    played = str(value.get("played_game") or value.get("other_game") or "").strip().strip('"«»“” ')
+    if not played or not game_title:
+        return None
+    from .youtube import normalize, phrase_words, title_matches
+
+    if not re.search(r"[a-z]", normalize(played)):
+        return None
+    if normalize(played) == normalize(game_title) or title_matches(game_title, played):
+        return None
+    played_words, title_words = set(phrase_words(played)), set(phrase_words(game_title))
+    if not played_words or not title_words or played_words <= title_words:
+        return None
+    return played[:120]
+
+
 def about_the_game(items: list[str]) -> list[str]:
     return [x for x in items if not META_ITEM.search(x)]
 
 
-def validate_letsplay_json(value: dict, text: str | None = None) -> dict:
+def validate_letsplay_json(value: dict, text: str | None = None, game_title: str | None = None) -> dict:
+    other = other_game(value, game_title)
+    if other:
+        return {"about_this_game": False, "other_game": other, "has_commentary": False, "evidence": [],
+                "summary": "", "pros": [], "cons": [], "verdict": ""}
     summary = str(value.get("summary") or "").strip()
     pros = about_the_game(_str_list(value.get("pros") or value.get("likes")))
     cons = about_the_game(_str_list(value.get("cons") or value.get("dislikes")))
@@ -377,18 +401,23 @@ def validate_letsplay_json(value: dict, text: str | None = None) -> dict:
     evidence = verified_quotes(raw_evidence, text)
     has_commentary = _flag(value.get("has_commentary", True)) and bool(evidence)
     if not has_commentary:
-        return {"has_commentary": False, "evidence": [], "summary": "", "pros": [], "cons": [], "verdict": "",
-                "evidence_rejected": len(raw_evidence) - len(evidence)}
+        return {"about_this_game": True, "has_commentary": False, "evidence": [], "summary": "", "pros": [],
+                "cons": [], "verdict": "", "evidence_rejected": len(raw_evidence) - len(evidence)}
+    pros = [x for x in pros if is_russian(x)]
+    cons = [x for x in cons if is_russian(x)]
     if not summary and not pros and not cons:
         raise LLMError("пустое заключение")
-    ensure_russian(summary, pros, cons, verdict)
-    return {"has_commentary": True, "evidence": evidence, "summary": summary, "pros": pros, "cons": cons,
-            "verdict": verdict}
+    ensure_russian(summary, verdict)
+    return {"about_this_game": True, "has_commentary": True, "evidence": evidence, "summary": summary, "pros": pros,
+            "cons": cons, "verdict": verdict}
 
 
-def validate_description_json(value: dict) -> dict:
+def validate_description_json(value: dict, game_title: str | None = None) -> dict:
+    other = other_game(value, game_title)
+    if other:
+        return {"about_this_game": False, "other_game": other, "summary": "", "pros": [], "cons": [], "verdict": ""}
     summary = str(value.get("summary") or "").strip()
     if not summary:
         raise LLMError("пустой пересказ описания")
     ensure_russian(summary)
-    return {"summary": summary, "pros": [], "cons": [], "verdict": ""}
+    return {"about_this_game": True, "summary": summary, "pros": [], "cons": [], "verdict": ""}

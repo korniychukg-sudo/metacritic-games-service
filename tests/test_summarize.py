@@ -192,12 +192,53 @@ def test_description_prompt_and_validator_never_attribute_opinions():
     assert "pros" not in msgs[-1]["content"] and "has_commentary" not in msgs[-1]["content"]
     assert "описания роликов" in msgs[0]["content"]
     out = validate_description_json({"summary": "Судя по описанию ролика, это полное демо.", "pros": ["x"]})
-    assert out == {"summary": "Судя по описанию ролика, это полное демо.", "pros": [], "cons": [], "verdict": ""}
+    assert out == {"about_this_game": True, "summary": "Судя по описанию ролика, это полное демо.", "pros": [],
+                   "cons": [], "verdict": ""}
     transcript = build_letsplay_prompt("Game", "Video", "Chan", "I love it. " * 50, "transcript")
     assert '"has_commentary"' in transcript[-1]["content"] and "только о самой игре" in transcript[-1]["content"]
 
 
-def test_review_prompt_asks_for_game_properties_only():
-    g = game()
-    body = build_review_prompt(g.title, "critic", g.critic_reviews)[-1]["content"]
-    assert "только свойства самой игры" in body
+def test_llm_names_the_played_game_and_code_decides_whether_it_is_another_one():
+    from app.summarize import build_letsplay_prompt, validate_description_json, validate_letsplay_json
+
+    text = "welcome back to Monster Hunter, today we fight Basarios and I really love this hunt. " * 20
+    for source in ("transcript", "whisper", "description"):
+        body = build_letsplay_prompt("Rock Hunter", "Monster Hunter 4 Ultimate - Part 12", "c", text, source)
+        task = body[-1]["content"]
+        assert "played_game" in task and "{title}" not in task
+    wrong = {"played_game": "Monster Hunter 4 Ultimate", "has_commentary": True,
+             "evidence": ["welcome back to Monster Hunter"],
+             "summary": "Игра «Rock Hunter» предлагает интересный геймплей.", "pros": ["бой"], "cons": []}
+    out = validate_letsplay_json(wrong, text, "Rock Hunter")
+    assert out["about_this_game"] is False and out["other_game"] == "Monster Hunter 4 Ultimate"
+    assert out["summary"] == "" and out["pros"] == [] and not out["evidence"]
+    same = [("Rock Hunter", "Rock Hunter"), ("ROCK HUNTER", "Rock Hunter"), ("", "Rock Hunter"),
+            ("Hellraiser", "Clive Barker's Hellraiser: Revival"), ("Аллоглум", "Allogloom"),
+            ("Kingdom Hearts 3", "Kingdom Hearts III"), ("Allogloom", "Allogloom")]
+    for played, game in same:
+        res = validate_letsplay_json({**wrong, "played_game": played}, text, game)
+        assert res["about_this_game"] is True and res["summary"], (played, game)
+    assert validate_letsplay_json(wrong, text)["about_this_game"] is True
+    assert validate_description_json({"played_game": "SimCity", "summary": "Судя по описанию ролика, это SimCity."},
+                                     "Alice Nation") == {
+        "about_this_game": False, "other_game": "SimCity", "summary": "", "pros": [], "cons": [], "verdict": ""}
+
+
+def test_untranslated_quotes_in_pros_are_dropped_not_fatal():
+    from app.summarize import validate_letsplay_json
+
+    text = "Phase one is super easy. Excellent blade work. I love the parry but the timing is hard. " * 20
+    out = validate_letsplay_json({"played_game": "Valor Mortis", "has_commentary": True,
+                                  "evidence": ["Phase one is super easy"],
+                                  "summary": "Автор хвалит бои и парирование, но жалуется на тайминги.",
+                                  "pros": ["Phase one is super easy", "Отзывчивое парирование"],
+                                  "cons": ["Excellent blade work.", "Сложные тайминги"], "verdict": "Понравилось."},
+                                 text, "Valor Mortis")
+    assert out["pros"] == ["Отзывчивое парирование"] and out["cons"] == ["Сложные тайминги"]
+    try:
+        validate_letsplay_json({"has_commentary": True, "evidence": ["Phase one is super easy"],
+                                "summary": "The author likes it.", "pros": [], "cons": []}, text)
+    except LLMError:
+        pass
+    else:
+        raise AssertionError

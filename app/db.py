@@ -143,7 +143,13 @@ MIGRATIONS: list[list[str]] = [
         "WHERE json_extract(letsplay, '$.method') IN ('llm-transcript', 'llm-whisper') "
         "AND json_extract(letsplay, '$.has_commentary') IS NULL",
     ],
+    [
+        "fix_wrong_game_videos",
+    ],
 ]
+
+RESET_LETSPLAY_NOTE = ("Найденный раньше ролик не прошёл новую проверку: в его оригинальном названии нет названия игры "
+                       "или он опубликован задолго до её выхода. Летсплей будет найден заново")
 
 
 def fix_title_search(conn: sqlite3.Connection) -> None:
@@ -197,10 +203,50 @@ def fix_description_letsplays(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE games SET letsplay=? WHERE id=?", (_dumps(lp), gid))
 
 
+def fix_wrong_game_videos(conn: sqlite3.Connection) -> None:
+    from .youtube import parse_day, recheck_letsplay, stored_candidate, trailer_problem
+
+    now = iso(utcnow())
+    today = utcnow().date()
+    dates: dict[int, list[str]] = {}
+    for gid, day in conn.execute("SELECT game_id, release_date FROM platforms WHERE release_date IS NOT NULL"):
+        dates.setdefault(gid, []).append(day)
+    rows = conn.execute("SELECT id, title, release_date, letsplay, trailer FROM games").fetchall()
+    for gid, title, release_date, lp_raw, tr_raw in rows:
+        days = [d for d in (parse_day(x) for x in [release_date, *dates.get(gid, [])]) if d]
+        anchor = min(days).isoformat() if days else None
+        lp = json.loads(lp_raw) if lp_raw else None
+        if lp and lp.get("video"):
+            video = lp["video"]
+            ref = parse_day(lp.get("updated_at")) or today
+            reason = recheck_letsplay(title, stored_candidate(video), anchor, ref)
+            if reason:
+                lp = {"status": "no_video", "method": "none", "candidates": [], "updated_at": now, "checked_at": now,
+                      "recheck": True, "note": RESET_LETSPLAY_NOTE,
+                      "rejected": [{"video_id": video.get("video_id"), "title": video.get("title"), "reason": reason}]}
+            elif "about_this_game" not in lp:
+                lp["recheck"] = True
+            conn.execute("UPDATE games SET letsplay=? WHERE id=?", (_dumps(lp), gid))
+        elif lp and lp.get("status") == "no_video" and str(lp.get("note", "")).startswith("Летсплеи по игре на YouTube"):
+            lp["recheck"] = True
+            conn.execute("UPDATE games SET letsplay=? WHERE id=?", (_dumps(lp), gid))
+        tr = json.loads(tr_raw) if tr_raw else None
+        if tr and tr.get("status") == "ok" and tr.get("video"):
+            video = tr["video"]
+            ref = parse_day(tr.get("updated_at")) or today
+            reason = trailer_problem(title, stored_candidate(video), anchor, ref,
+                                     strict_edition=not video.get("base_game"))
+            if reason:
+                tr = {"status": "none", "updated_at": now, "checked_at": now, "recheck": True,
+                      "rejected": {"video_id": video.get("video_id"), "title": video.get("title"), "reason": reason}}
+                conn.execute("UPDATE games SET trailer=? WHERE id=?", (_dumps(tr), gid))
+
+
 DATA_FIXES = {
     "fix_title_search": fix_title_search,
     "fix_non_russian_summaries": fix_non_russian_summaries,
     "fix_description_letsplays": fix_description_letsplays,
+    "fix_wrong_game_videos": fix_wrong_game_videos,
 }
 
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -508,6 +554,23 @@ class Database:
                 "    AND json_extract(letsplay, '$.video.description') IS NOT NULL) "
                 "ORDER BY backfill_at IS NOT NULL, backfill_at, updated_at DESC LIMIT ?", (limit,)).fetchall()
         return [self._row_to_game(r) for r in rows]
+
+    def games_needing_video_recheck(self, limit: int) -> list[dict]:
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id, slug, title, release_date, video_embed_url, letsplay, trailer FROM games "
+                "WHERE json_extract(letsplay, '$.recheck') = 1 OR json_extract(trailer, '$.recheck') = 1 "
+                "ORDER BY coalesce(json_extract(letsplay, '$.checked_at'), json_extract(trailer, '$.checked_at'), ''), "
+                "id LIMIT ?", (limit,)).fetchall()
+            out = []
+            for r in rows:
+                g = dict(r)
+                for f in ("letsplay", "trailer"):
+                    g[f] = json.loads(g[f]) if g[f] else None
+                g["platform_dates"] = [d[0] for d in c.execute(
+                    "SELECT release_date FROM platforms WHERE game_id=? AND release_date IS NOT NULL", (g["id"],))]
+                out.append(g)
+        return out
 
     def all_features(self) -> list[dict]:
         with self.conn() as c:

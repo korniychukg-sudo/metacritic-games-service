@@ -33,7 +33,7 @@ EXCLUDE = re.compile(
     re.I,
 )
 STOP = {"the", "a", "an", "of", "and", "edition", "remastered", "remaster", "complete", "definitive", "deluxe",
-        "game", "goty", "collection", "hd", "for"}
+        "game", "goty", "collection", "hd", "for", "dlc"}
 EDITION_WORDS = {
     "collection": "collection", "remaster": "remaster", "remastered": "remaster", "remake": "remake",
     "complete": "complete", "definitive": "definitive", "edition": "edition", "deluxe": "deluxe", "goty": "goty",
@@ -48,7 +48,34 @@ AGE_UNITS = {"s": 1 / 86400, "sec": 1 / 86400, "second": 1 / 86400, "min": 1 / 1
              "h": 1 / 24, "hr": 1 / 24, "hour": 1 / 24, "d": 1, "day": 1, "w": 7, "wk": 7, "week": 7,
              "mo": 30, "month": 30, "y": 365, "yr": 365, "year": 365}
 AGE = re.compile(r"(\d+)\s*(second|sec|minute|min|hour|hr|h|day|d|week|wk|w|month|mo|year|yr|y|s)s?\s+ago", re.I)
-SUBTITLE_SPLIT = re.compile(r"\s*[:~\u2013\u2014]\s*|\s+-\s+")
+SUBTITLE_SPLIT = re.compile(r"\s*[:~\u2013\u2014]\s*|\s+-\s+|\s+\+\s+")
+PLATFORM_EDITION = re.compile(
+    r"\b(nintendo\s+switch\s*2|switch\s*2|ps5|playstation\s*5|xbox\s+series\s+x\s*\|?\s*s?)\s+edition\b", re.I)
+SEGMENT_SPLIT = re.compile(r"\s+[-|/~•·]+\s+|[|:~\u2013\u2014()\[\]{}【】「」《》<>/\\•·!?#]|[^\w\s'’&.,+\-]")
+ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii": "7", "viii": "8", "ix": "9",
+         "x": "10", "xi": "11", "xii": "12", "xiii": "13", "xiv": "14", "xv": "15", "xvi": "16", "xvii": "17",
+         "xviii": "18", "xix": "19", "xx": "20"}
+DESCRIPTORS = {
+    "official", "trailer", "trailers", "teaser", "launch", "reveal", "revealed", "announcement", "announce",
+    "gameplay", "release", "date", "story", "cinematic", "extended", "premiere", "overview", "features", "feature",
+    "first", "look", "new", "video", "english", "demo", "early", "access", "pre", "full", "final", "accolades",
+    "showcase", "ps5", "ps4", "xbox", "series", "switch", "nintendo", "pc", "steam", "4k", "1080p", "60fps", "vr",
+    "mobile", "ios", "android", "playtest", "update", "by", "out", "now", "coming", "soon", "available", "world",
+    "debut", "opening", "intro", "remake", "anniversary", "enhanced", "ultimate", "трейлер", "тизер",
+    "официальный", "игра", "геймплей", "анонс", "релиз",
+}
+LETSPLAY_LEAD = DESCRIPTORS | {
+    "let", "s", "lets", "play", "plays", "playing", "played", "try", "trying", "tried", "walkthrough",
+    "playthrough", "longplay", "part", "episode", "ep", "1", "we", "so", "this", "is", "it", "my", "live", "stream",
+    "streamed", "blind", "прохождение", "полное", "играем", "стрим", "летсплей",
+}
+YEAR = re.compile(r"(19|20)\d\d")
+NOT_A_GAME = re.compile(r"\b(wedding|full\s+movie|movie\s+trailer|film\s+trailer|official\s+film)\b"
+                        r"|свадьб|фильм|кинофильм", re.I)
+FILM_CHANNEL = re.compile(r"\b(movies?|films?|cinema|movieclips|кино)\b", re.I)
+REACTION = re.compile(r"\breaction\b|реакция", re.I)
+LETSPLAY_WINDOW_DAYS = 365
+TRAILER_WINDOW_DAYS = 3 * 365
 
 
 @dataclass
@@ -63,6 +90,9 @@ class VideoCandidate:
     live: bool = False
     queries: list[str] = field(default_factory=list)
     base_game: bool = False
+    published_date: str | None = None
+    search_title: str | None = None
+    refined: bool = False
 
     @property
     def url(self) -> str:
@@ -81,55 +111,113 @@ def normalize(text: str) -> str:
     return re.sub(r"[^\w]+", " ", text).strip()
 
 
-def title_tokens(title: str) -> list[str]:
-    toks = [t for t in normalize(title).split() if t not in STOP]
-    return toks or normalize(title).split()
+def phrase_words(text: str, keep_stop: bool = False) -> list[str]:
+    toks = [ROMAN.get(t, t) for t in normalize(text).split()]
+    return toks if keep_stop else [t for t in toks if t not in STOP]
 
 
-def _split_words(title: str) -> tuple[set[str], set[str]]:
-    words, nums = set(), set()
-    for t in title_tokens(title):
-        if t.isdigit():
-            nums.add(t)
-        elif len(t) >= 2:
-            words.add(t)
-    return words, nums
+def game_phrases(game_title: str) -> tuple[list[list[list[str]]], bool]:
+    title = PLATFORM_EDITION.sub(" ", game_title or "")
+    keep_stop = len(phrase_words(title)) <= 1
+    parts = [w for w in (phrase_words(p, keep_stop) for p in SUBTITLE_SPLIT.split(title)) if w]
+    if not parts:
+        parts = [phrase_words(title, True)] if phrase_words(title, True) else []
+    if not parts:
+        return [], keep_stop
+    variants = [parts]
+    first = parts[0]
+    owners = [i for i, t in enumerate(first[:-1]) if t == "s" and i > 0]
+    if owners:
+        rest = first[owners[-1] + 1:]
+        if len(rest) + sum(len(p) for p in parts[1:]) >= 2:
+            variants.append([rest] + parts[1:])
+    return variants, keep_stop
 
 
-def _numbers_in_place(game_title: str, video_title: str) -> bool:
-    gt = normalize(game_title).split()
-    vt = f" {normalize(video_title)} "
-    for i, tok in enumerate(gt):
-        if not tok.isdigit():
-            continue
-        if i > 0:
-            phrase = f" {gt[i - 1]} {tok} "
-        elif i + 1 < len(gt):
-            phrase = f" {tok} {gt[i + 1]} "
-        else:
-            phrase = f" {tok} "
-        if phrase not in vt:
+def video_tokens(video_title: str, keep_stop: bool) -> list[tuple[str, int]]:
+    out = []
+    for seg_no, seg in enumerate(SEGMENT_SPLIT.split(video_title or "")):
+        for t in phrase_words(seg, keep_stop):
+            out.append((t, seg_no))
+    return out
+
+
+def _occurrences(tokens: list[tuple[str, int]], phrase: list[str]) -> list[tuple[int, int]]:
+    n = len(phrase)
+    words = [t for t, _ in tokens]
+    return [(i, i + n) for i in range(len(words) - n + 1) if n and words[i:i + n] == phrase]
+
+
+def _sequel_after(tokens: list[tuple[str, int]], end: int, game_words: set[str]) -> bool:
+    if end >= len(tokens) or tokens[end][1] != tokens[end - 1][1]:
+        return False
+    nxt = tokens[end][0]
+    return nxt.isdigit() and 1 <= int(nxt) <= 20 and nxt not in game_words
+
+
+def _lead_ok(tokens: list[tuple[str, int]], start: int, allowed: set[str]) -> bool:
+    seg = tokens[start][1]
+    for t, s in reversed(tokens[:start]):
+        if s != seg:
+            break
+        if t not in allowed and t not in STOP:
             return False
     return True
 
 
-def title_matches(game_title: str, video_title: str) -> bool:
-    words, nums = _split_words(game_title)
-    vt = set(normalize(video_title).split())
-    if not words and not nums:
-        words = set(normalize(game_title).split())
-    if not words:
-        return bool(nums) and nums <= vt
-    if not _numbers_in_place(game_title, video_title):
+def _anchored(tokens: list[tuple[str, int]], start: int, end: int, next_ok: set[str]) -> bool:
+    if not _lead_ok(tokens, start, DESCRIPTORS):
         return False
-    overlap = len(words & vt) / len(words)
-    parts = SUBTITLE_SPLIT.split(game_title, maxsplit=1)
-    if len(parts) == 2:
-        sub_words, _ = _split_words(parts[1])
-        if sub_words and not sub_words <= vt:
+    if end < len(tokens) and tokens[end][1] == tokens[end - 1][1]:
+        nxt = tokens[end][0]
+        latin = re.search(r"[a-z0-9]", nxt)
+        if latin and nxt not in DESCRIPTORS and nxt not in next_ok and not YEAR.fullmatch(nxt):
             return False
-        return overlap >= 0.5
-    return overlap >= 0.75
+    return True
+
+
+def title_matches(game_title: str, video_title: str, anchored: bool = False) -> bool:
+    variants, keep_stop = game_phrases(game_title)
+    if not variants:
+        return False
+    tokens = video_tokens(video_title, keep_stop)
+    for parts in variants:
+        game_words = {t for p in parts for t in p}
+        joined = [t for p in parts for t in p]
+        for start, end in _occurrences(tokens, joined):
+            if _sequel_after(tokens, end, game_words):
+                continue
+            if anchored:
+                if _anchored(tokens, start, end, set()):
+                    return True
+            elif not keep_stop or _lead_ok(tokens, start, LETSPLAY_LEAD):
+                return True
+        if len(parts) < 2:
+            continue
+        found = []
+        for part in parts:
+            occ = [o for o in _occurrences(tokens, part) if not _sequel_after(tokens, o[1], game_words)]
+            if not occ:
+                break
+            found.append(occ)
+        else:
+            if not anchored:
+                return True
+            heads = {p[0] for p in parts[1:]}
+            if any(_anchored(tokens, s, e, heads) for s, e in found[0]):
+                return True
+    return False
+
+
+def near_miss(game_title: str, video_title: str) -> bool:
+    variants, keep_stop = game_phrases(game_title)
+    if not variants:
+        return False
+    words = {t for p in variants[0] for t in p if len(t) > 1 or t.isdigit()}
+    if not words:
+        return False
+    have = {t for t, _ in video_tokens(video_title, keep_stop)}
+    return len(words & have) * 2 >= len(words)
 
 
 def edition_words(title: str) -> set[str]:
@@ -138,6 +226,13 @@ def edition_words(title: str) -> set[str]:
 
 def edition_matches(game_title: str, video_title: str) -> bool:
     return edition_words(game_title) <= edition_words(video_title)
+
+
+def parse_day(value: str | None) -> date | None:
+    try:
+        return date.fromisoformat(str(value)[:10]) if value else None
+    except ValueError:
+        return None
 
 
 def parse_age_days(text: str | None) -> float | None:
@@ -271,9 +366,12 @@ def parse_watch_html(html_text: str) -> dict | None:
     if not m:
         return None
     try:
-        details = json.loads(m.group(1)).get("videoDetails") or {}
+        player = json.loads(m.group(1))
     except json.JSONDecodeError:
         return None
+    details = player.get("videoDetails") or {}
+    micro = (player.get("microformat") or {}).get("playerMicroformatRenderer") or {}
+    published = parse_day(micro.get("publishDate") or micro.get("uploadDate"))
     return {
         "video_id": details.get("videoId"),
         "title": details.get("title"),
@@ -282,61 +380,127 @@ def parse_watch_html(html_text: str) -> dict | None:
         "channel": details.get("author"),
         "description": details.get("shortDescription"),
         "live": bool(details.get("isLiveContent")),
+        "published_date": published.isoformat() if published else None,
     }
 
 
+def published_too_early(cand: VideoCandidate, release_date: str | None, today: date, window_days: int) -> bool:
+    released = parse_day(release_date)
+    if released is None:
+        return False
+    limit = released - timedelta(days=window_days)
+    exact = parse_day(cand.published_date)
+    if exact is not None:
+        return exact < limit
+    age = parse_age_days(cand.published)
+    if age is None:
+        return False
+    return today - timedelta(days=age) <= limit
+
+
+def _count(stats: dict | None, key: str) -> None:
+    if stats is not None:
+        stats[key] = stats.get(key, 0) + 1
+
+
 def rank_candidates(game_title: str, candidates: list[VideoCandidate], min_seconds: int = 600,
-                    released: bool = False, stats: dict | None = None) -> list[VideoCandidate]:
+                    released: bool = False, stats: dict | None = None, release_date: str | None = None,
+                    today: date | None = None) -> list[VideoCandidate]:
+    today = today or date.today()
     eligible = []
     for c in candidates:
         if c.live or c.views is None:
+            _count(stats, "short_or_live")
             continue
         if c.length_seconds is not None and c.length_seconds < min_seconds:
+            _count(stats, "short_or_live")
             continue
         if EXCLUDE.search(c.title):
+            _count(stats, "excluded")
             continue
         if not title_matches(game_title, c.title):
-            if stats is not None:
-                stats["title_mismatch"] = stats.get("title_mismatch", 0) + 1
+            _count(stats, "title_mismatch")
+            if near_miss(game_title, c.title):
+                _count(stats, "near_miss")
+            continue
+        if published_too_early(c, release_date, today, LETSPLAY_WINDOW_DAYS):
+            _count(stats, "too_old")
             continue
         eligible.append(c)
     if stats is not None:
         stats["found"] = len(candidates)
         stats["eligible"] = len(eligible)
-    return sorted(eligible, key=lambda c: (released and bool(PRE_RELEASE.search(c.title)), -(c.views or 0)))
+    return sort_letsplays(eligible, released)
 
 
-def recent_enough(cand: VideoCandidate, release_date: str | None, today: date) -> bool:
-    age = parse_age_days(cand.published)
-    if age is None or not release_date:
-        return True
-    try:
-        released = date.fromisoformat(str(release_date)[:10])
-    except ValueError:
-        return True
-    return today - timedelta(days=age) >= released - timedelta(days=365)
+def sort_letsplays(candidates: list[VideoCandidate], released: bool) -> list[VideoCandidate]:
+    return sorted(candidates, key=lambda c: (released and bool(PRE_RELEASE.search(c.title)), -(c.views or 0)))
+
+
+def recheck_letsplay(game_title: str, cand: VideoCandidate, release_date: str | None, today: date) -> str | None:
+    if EXCLUDE.search(cand.title):
+        return f"по оригинальному названию («{cand.title}») это трейлер, обзор или ролик без комментариев"
+    if not title_matches(game_title, cand.title):
+        return f"в оригинальном названии ролика («{cand.title}») нет названия игры"
+    if published_too_early(cand, release_date, today, LETSPLAY_WINDOW_DAYS):
+        when = cand.published_date or cand.published or "давно"
+        return f"ролик опубликован {when}, больше чем за год до выхода игры"
+    return None
+
+
+def trailer_problem(game_title: str, cand: VideoCandidate, release_date: str | None, today: date,
+                    strict_edition: bool = True, max_seconds: int = 600) -> str | None:
+    if cand.live or cand.views is None:
+        return "трансляция или нет просмотров"
+    if cand.length_seconds is None or not 20 <= cand.length_seconds <= max_seconds:
+        return "не похоже на трейлер по длительности"
+    if not TRAILER.search(cand.title) or REACTION.search(cand.title):
+        return "в названии нет слова «трейлер» или это реакция"
+    if NOT_A_GAME.search(cand.title) or (cand.channel and FILM_CHANNEL.search(cand.channel)):
+        return "похоже на фильм или личное видео"
+    if not title_matches(game_title, cand.title, anchored=True):
+        return "название игры не стоит отдельно в начале названия ролика"
+    if strict_edition:
+        if not edition_matches(game_title, cand.title):
+            return "в названии нет слов издания"
+        if published_too_early(cand, release_date, today, TRAILER_WINDOW_DAYS):
+            return "трейлер опубликован больше чем за три года до выхода игры"
+    return None
 
 
 def rank_trailers(game_title: str, candidates: list[VideoCandidate], max_seconds: int = 600,
                   release_date: str | None = None, today: date | None = None,
                   strict_edition: bool = True) -> list[VideoCandidate]:
     today = today or date.today()
-    eligible = []
-    for c in candidates:
-        if c.live or c.views is None:
-            continue
-        if c.length_seconds is None or not 20 <= c.length_seconds <= max_seconds:
-            continue
-        if not TRAILER.search(c.title) or re.search(r"\breaction\b|реакция", c.title, re.I):
-            continue
-        if not title_matches(game_title, c.title):
-            continue
-        if strict_edition and not edition_matches(game_title, c.title):
-            continue
-        eligible.append(c)
-    recent = [c for c in eligible if recent_enough(c, release_date, today)]
-    pool = recent or eligible
-    return sorted(pool, key=lambda c: (not bool(OFFICIAL.search(c.title)), -(c.views or 0)))
+    eligible = [c for c in candidates
+                if trailer_problem(game_title, c, release_date, today, strict_edition, max_seconds) is None]
+    return sorted(eligible, key=lambda c: (not bool(OFFICIAL.search(c.title)), -(c.views or 0)))
+
+
+CANDIDATE_FIELDS = ("video_id", "title", "views", "length_seconds", "channel", "published", "description", "live",
+                    "base_game", "published_date", "search_title")
+
+
+def stored_candidate(video: dict) -> VideoCandidate:
+    data = {k: video[k] for k in CANDIDATE_FIELDS if video.get(k) is not None}
+    data.setdefault("video_id", "")
+    data.setdefault("title", "")
+    return VideoCandidate(**data)
+
+
+def apply_watch_details(cand: VideoCandidate, details: dict | None) -> None:
+    cand.refined = True
+    if not details:
+        return
+    title = details.get("title")
+    if title and title != cand.title:
+        cand.search_title = cand.search_title or cand.title
+        cand.title = title
+    cand.views = details.get("views") or cand.views
+    cand.length_seconds = details.get("length_seconds") or cand.length_seconds
+    cand.channel = details.get("channel") or cand.channel
+    cand.description = details.get("description") or cand.description
+    cand.published_date = details.get("published_date") or cand.published_date
 
 
 def merge_candidates(lists: list[tuple[str, list[VideoCandidate]]]) -> list[VideoCandidate]:
@@ -410,9 +574,11 @@ class TranscriptUnavailable(Exception):
 
 
 class YouTubeClient:
-    def __init__(self, http: PoliteClient, proxy_url: str = ""):
+    def __init__(self, http: PoliteClient, proxy_url: str = "", refine_top: int = 5, today=None):
         self.http = http
         self.proxy_url = proxy_url
+        self.refine_top = refine_top
+        self.today = today or date.today
         self._api = None
         self.last_stats: dict = {}
 
@@ -430,6 +596,17 @@ class YouTubeClient:
                              headers={"Accept": "text/html"})
         return parse_watch_html(resp.text)
 
+    def refine(self, cand: VideoCandidate) -> bool:
+        if cand.refined:
+            return True
+        try:
+            details = self.watch_details(cand.video_id)
+        except Exception as exc:
+            log.info("Страница ролика %s недоступна: %s", cand.video_id, exc)
+            return False
+        apply_watch_details(cand, details)
+        return details is not None
+
     def find_letsplays(self, game_title: str, release_date: str | None = None) -> list[VideoCandidate]:
         results = []
         last_exc: Exception | None = None
@@ -442,17 +619,35 @@ class YouTubeClient:
         if not results and last_exc is not None:
             raise last_exc
         stats: dict = {}
-        ranked = rank_candidates(game_title, merge_candidates(results), released=is_released(release_date),
-                                 stats=stats)
+        today = self.today()
+        released = is_released(release_date, today)
+        ranked = rank_candidates(game_title, merge_candidates(results), released=released, stats=stats,
+                                 release_date=release_date, today=today)
+        head, tail = ranked[: self.refine_top], ranked[self.refine_top:]
+        kept, dropped = [], []
+        for cand in head:
+            if self.refine(cand):
+                reason = recheck_letsplay(game_title, cand, release_date, today)
+                if reason:
+                    dropped.append({"video_id": cand.video_id, "title": cand.title,
+                                    "search_title": cand.search_title, "reason": reason})
+                    continue
+            kept.append(cand)
+        if dropped:
+            stats["dropped"] = dropped
+            stats["eligible"] = stats.get("eligible", 0) - len(dropped)
         self.last_stats = stats
-        return ranked
+        return sort_letsplays(kept, released) + tail
 
     def find_trailer(self, game_title: str, release_date: str | None = None) -> VideoCandidate | None:
         found = self.search(f"{game_title} official trailer", sp=None)
-        ranked = rank_trailers(game_title, found, release_date=release_date)
+        today = self.today()
+        ranked = rank_trailers(game_title, found, release_date=release_date, today=today)
         if ranked:
             return ranked[0]
-        relaxed = rank_trailers(game_title, found, release_date=release_date, strict_edition=False)
+        if not edition_words(game_title):
+            return None
+        relaxed = rank_trailers(game_title, found, release_date=release_date, today=today, strict_edition=False)
         if relaxed:
             relaxed[0].base_game = True
             return relaxed[0]

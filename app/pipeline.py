@@ -23,7 +23,17 @@ from .summarize import (
     validate_description_json,
     validate_letsplay_json,
 )
-from .youtube import TranscriptUnavailable, VideoCandidate, YouTubeClient, sample_transcript
+from .youtube import (
+    TranscriptUnavailable,
+    VideoCandidate,
+    YouTubeClient,
+    apply_watch_details,
+    parse_day,
+    recheck_letsplay,
+    sample_transcript,
+    stored_candidate,
+    trailer_problem,
+)
 
 log = logging.getLogger("pipeline")
 
@@ -33,6 +43,10 @@ TRANSCRIPT_EXTRACTIVE = {"extractive-transcript": "transcript", "extractive-whis
 NO_COMMENTARY_TEXT = "в тексте почти нет речи автора (только диалоги игры, музыка или шум)"
 NO_COMMENTARY_LLM = "LLM не нашла в тексте оценок игры от автора ролика (диалоги игры или геймплей без комментариев)"
 NO_TEXT = "субтитров нет, речь не распознана"
+WRONG_GAME_LLM = "по расшифровке ролик о другой игре (так ответила LLM)"
+WRONG_GAME_DESCRIPTION = "по названию и описанию ролик о другой игре (так ответила LLM)"
+NO_COMMENTARY = (NO_COMMENTARY_TEXT, NO_COMMENTARY_LLM)
+WRONG_GAME = (WRONG_GAME_LLM, WRONG_GAME_DESCRIPTION)
 SCALAR_KEEP = ("description", "cover_url", "hero_url", "video_embed_url", "video_manifest_url", "video_title",
                "release_date", "lead_platform", "rating")
 LIST_KEEP = ("developers", "publishers", "genres", "franchises")
@@ -66,10 +80,18 @@ def failure_note(checked: list[dict], stt_notes: list[dict], skipped: list[dict]
         parts.append("субтитры YouTube не запрашивались (YOUTUBE_CAPTIONS=0)")
     if stt_notes:
         parts.append("Whisper: " + grouped([n["reason"] for n in stt_notes]))
-    no_talk = [s for s in skipped if s["reason"] in (NO_COMMENTARY_TEXT, NO_COMMENTARY_LLM)]
+    no_talk = [s for s in skipped if s["reason"] in NO_COMMENTARY]
     if no_talk:
         parts.append("без комментариев автора: " + ru_count(len(no_talk), "ролик", "ролика", "роликов"))
+    other = [s for s in skipped if s["reason"] in WRONG_GAME]
+    if other:
+        parts.append("о другой игре: " + ru_count(len(other), "ролик", "ролика", "роликов"))
     return "Речь автора ролика не расшифрована" + (f" ({'; '.join(parts)})" if parts else "")
+
+
+def release_anchor(release_date: str | None, platform_dates) -> str | None:
+    days = [d for d in (parse_day(x) for x in [release_date, *(platform_dates or [])]) if d]
+    return min(days).isoformat() if days else None
 
 
 def letsplay_rank(lp: dict | None) -> int:
@@ -354,6 +376,15 @@ class Pipeline:
             except Exception:
                 log.exception("Запуск #%d: досчёт через LLM упал", run_id)
 
+        if s.video_recheck_limit and self.yt is not None and self.clock() < deadline:
+            try:
+                self._step("YouTube: перепроверка роликов")
+                rechecked = self.recheck_videos(s.video_recheck_limit, deadline, {it.id for it, _ in sel.items})
+                if rechecked:
+                    log.info("Запуск #%d: перепроверены ролики у %d игр", run_id, rechecked)
+            except Exception:
+                log.exception("Запуск #%d: перепроверка роликов упала", run_id)
+
         try:
             self._step("похожие игры")
             self.recompute_similar()
@@ -405,28 +436,52 @@ class Pipeline:
 
         if self.yt is None:
             return
-        self.ensure_trailer(game, prev.get("trailer"), run_id, day)
-        old_lp = prev.get("letsplay")
+        anchor = release_anchor(game.release_date, [pl.release_date for pl in game.platforms])
+        self.ensure_trailer(game.id, game.slug, game.title, anchor, bool(game.video_embed_url), prev.get("trailer"),
+                            run_id, day)
+        self.refresh_letsplay(game.id, game.slug, game.title, anchor, prev.get("letsplay"), run_id, day)
+
+    def today(self):
+        return datetime.strptime(self.settings.today(self.clock()), "%Y-%m-%d").date()
+
+    def refresh_letsplay(self, game_id: int, slug: str, title: str, anchor: str | None, old_lp: dict | None,
+                         run_id: int | None, day: str) -> None:
         if not self.letsplay_due(old_lp):
             return
-        self._step("YouTube: поиск летсплея", game.title)
+        self._step("YouTube: поиск летсплея", title)
         now = iso(self.clock())
         try:
-            letsplay = self.find_letsplay(game.title, game.release_date)
+            letsplay = self.find_letsplay(title, anchor)
         except Exception as exc:
-            log.warning("Летсплей для %s: ошибка поиска: %s", game.slug, exc)
+            log.warning("Летсплей для %s: ошибка поиска: %s", slug, exc)
             step = "youtube:schema" if isinstance(exc, SchemaError) else "youtube"
-            self._error(run_id, day, game.slug, step, f"{exc.__class__.__name__}: {exc}")
+            self._error(run_id, day, slug, step, f"{exc.__class__.__name__}: {exc}")
             note = f"Ошибка при поиске летсплея: {exc}"
             letsplay = {"status": "error", "method": "none", "note": note, "updated_at": now, "checked_at": now}
-        if old_lp and old_lp.get("video") and letsplay_rank(old_lp) > letsplay_rank(letsplay):
-            log.info("Летсплей для %s: новый результат хуже сохранённого, оставлен прежний ролик", game.slug)
-            letsplay = {**old_lp, "last_error": letsplay.get("note") or "новый поиск не дал результата",
-                        "checked_at": now}
-        self.db.set_json(game.id, "letsplay", letsplay)
+        if self.keep_old_letsplay(title, anchor, old_lp, letsplay):
+            log.info("Летсплей для %s: новый результат хуже сохранённого, оставлен прежний ролик", slug)
+            kept = {**old_lp, "last_error": letsplay.get("note") or "новый поиск не дал результата",
+                    "checked_at": now}
+            if letsplay.get("status") != "error":
+                kept.pop("recheck", None)
+            letsplay = kept
+        self.db.set_json(game_id, "letsplay", letsplay)
+
+    def keep_old_letsplay(self, title: str, anchor: str | None, old: dict | None, new: dict) -> bool:
+        if not old or not old.get("video") or letsplay_rank(old) <= letsplay_rank(new):
+            return False
+        if old.get("recheck") and new.get("status") != "error":
+            return False
+        video = old["video"]
+        if video.get("video_id") in {r.get("video_id") for r in new.get("rejected") or []}:
+            return False
+        ref = parse_day(old.get("updated_at")) or self.today()
+        return recheck_letsplay(title, stored_candidate(video), anchor, ref) is None
 
     def _due(self, record: dict | None, period: timedelta) -> bool:
         if not record:
+            return True
+        if record.get("recheck"):
             return True
         stamps = [parse_iso(record.get(k)) for k in ("updated_at", "checked_at")]
         stamps = [t for t in stamps if t]
@@ -447,19 +502,33 @@ class Pipeline:
             return self._due(old, timedelta(hours=s.letsplay_retry_hours))
         return self._due(old, timedelta(days=s.trailer_refresh_days))
 
-    def ensure_trailer(self, game: GameDetails, old: dict | None, run_id: int, day: str) -> None:
-        if game.video_embed_url or not self.settings.trailer_fallback or not self.trailer_due(old):
+    def trailer_still_ok(self, title: str, old: dict | None, anchor: str | None) -> bool:
+        if not old or old.get("status") != "ok" or not old.get("video"):
+            return False
+        video = old["video"]
+        ref = parse_day(old.get("updated_at")) or self.today()
+        return trailer_problem(title, stored_candidate(video), anchor, ref,
+                               strict_edition=not video.get("base_game")) is None
+
+    def ensure_trailer(self, game_id: int, slug: str, title: str, anchor: str | None, has_video: bool,
+                       old: dict | None, run_id: int | None, day: str) -> None:
+        if has_video or not self.settings.trailer_fallback:
+            if old and old.get("recheck"):
+                self.db.set_json(game_id, "trailer", {k: v for k, v in old.items() if k != "recheck"})
+            return
+        if not self.trailer_due(old):
             return
         finder = getattr(self.yt, "find_trailer", None)
         if finder is None:
             return
-        self._step("YouTube: трейлер", game.title)
+        self._step("YouTube: трейлер", title)
         now = iso(self.clock())
+        keep = self.trailer_still_ok(title, old, anchor)
         try:
-            cand = finder(game.title, game.release_date)
+            cand = finder(title, anchor)
         except Exception as exc:
-            log.warning("Трейлер для %s: ошибка поиска: %s", game.slug, exc)
-            if old and old.get("status") == "ok":
+            log.warning("Трейлер для %s: ошибка поиска: %s", slug, exc)
+            if keep:
                 trailer = {**old, "last_error": str(exc)[:200], "checked_at": now}
             else:
                 trailer = {"status": "error", "error": str(exc)[:200], "checked_at": now, "updated_at": now}
@@ -467,30 +536,55 @@ class Pipeline:
             if cand is not None:
                 trailer = {"status": "ok", "source": "youtube", "video": cand.to_dict(), "updated_at": now,
                            "checked_at": now}
-            elif old and old.get("status") == "ok":
+            elif keep:
                 trailer = {**old, "last_error": "новый поиск не нашёл трейлер, оставлен прежний", "checked_at": now}
+                trailer.pop("recheck", None)
             else:
                 trailer = {"status": "none", "updated_at": now, "checked_at": now}
-        self.db.set_json(game.id, "trailer", trailer)
+        self.db.set_json(game_id, "trailer", trailer)
 
-    def find_letsplay(self, title: str, release_date: str | None = None) -> dict:
+    def no_video_note(self, title: str, stats: dict, rejected: list[dict]) -> str:
+        again = "Проверим снова через сутки"
+        if rejected:
+            return (f"Ролики с похожими названиями нашлись, но проверка показала, что они о другой игре или вышли "
+                    f"задолго до неё ({ru_count(len(rejected), 'ролик', 'ролика', 'роликов')}). {again}")
+        if stats.get("near_miss"):
+            return (f"На YouTube есть похожие ролики ({stats['near_miss']}), но ни в одном названии нет полного "
+                    f"названия «{title}». Проверка строгая, чтобы не взять ролик другой игры или другой части серии. "
+                    f"{again}")
+        if stats.get("too_old"):
+            return (f"Ролики с «{title}» в названии есть, но все опубликованы больше чем за год до выхода игры: "
+                    f"скорее всего, это другая игра с тем же названием. {again}")
+        if stats.get("title_mismatch"):
+            found = stats.get("found") or stats["title_mismatch"]
+            return (f"YouTube вернул {ru_count(found, 'ролик', 'ролика', 'роликов')}, но ни в одном названии нет "
+                    f"«{title}»; проверим снова через сутки")
+        return f"На YouTube не нашлось летсплеев длиннее 20 минут с названием игры в заголовке. {again}"
+
+    def find_letsplay(self, title: str, anchor: str | None = None) -> dict:
         now = iso(self.clock())
-        candidates = self.yt.find_letsplays(title, release_date)
-        stats = getattr(self.yt, "last_stats", None) or {}
+        today = self.today()
+        candidates = self.yt.find_letsplays(title, anchor)
+        stats = dict(getattr(self.yt, "last_stats", None) or {})
+        rejected = list(stats.get("dropped") or [])
         top = [c.to_dict() for c in candidates[:5]]
         if not candidates:
-            if stats.get("title_mismatch"):
-                note = (f"Летсплеи по игре на YouTube есть, но ни в одном названии нет полного названия «{title}». "
-                        "Проверка строгая, чтобы не взять ролик другой части серии. Проверим снова через сутки")
-            else:
-                note = ("На YouTube не нашлось летсплеев длиннее 20 минут с названием игры в заголовке. "
-                        "Проверим снова через сутки")
             return {"status": "no_video", "method": "none", "candidates": [], "updated_at": now, "checked_at": now,
-                    "note": note, "search": stats}
+                    "note": self.no_video_note(title, stats, rejected), "search": stats, "rejected": rejected}
         captions = self.settings.youtube_captions
-        checked, stt_notes, skipped = [], [], []
+        checked, stt_notes, skipped, tried = [], [], [], []
         stt_reasons_seen = set()
-        for cand in candidates[: self.settings.youtube_max_candidates]:
+        for cand in candidates:
+            if len(tried) >= self.settings.youtube_max_candidates:
+                break
+            if not cand.refined:
+                self._refine(cand)
+                reason = recheck_letsplay(title, cand, anchor, today)
+                if reason:
+                    rejected.append({"video_id": cand.video_id, "title": cand.title,
+                                     "search_title": cand.search_title, "reason": reason})
+                    continue
+            tried.append(cand)
             text = lang = speech = None
             if captions:
                 self._step("YouTube: субтитры", f"{title} / {cand.video_id}")
@@ -514,13 +608,20 @@ class Pipeline:
                 skipped.append({"video_id": cand.video_id, "reason": NO_COMMENTARY_TEXT})
                 log.info("Ролик %s (%s): в тексте почти нет речи автора, берём следующий", cand.video_id, title)
                 continue
-            self._refine(cand)
             self._step("LLM: заключение по летсплею", title)
             result, method, error = self._conclude(title, cand, text, source)
+            if result is not None and result.get("about_this_game") is False:
+                skipped.append({"video_id": cand.video_id, "reason": WRONG_GAME_LLM})
+                rejected.append({"video_id": cand.video_id, "title": cand.title, "reason": WRONG_GAME_LLM,
+                                 "other_game": result.get("other_game")})
+                log.info("Ролик %s (%s): по ответу LLM он о другой игре (%s), берём следующий", cand.video_id, title,
+                         result.get("other_game"))
+                continue
             if result is not None and not result.get("has_commentary"):
                 skipped.append({"video_id": cand.video_id, "reason": NO_COMMENTARY_LLM})
                 log.info("Ролик %s (%s): LLM не нашла комментариев автора, берём следующий", cand.video_id, title)
                 continue
+            unverified = result is None
             if result is None:
                 result, method = extractive_transcript_summary(text), f"extractive-{source}"
             record = {"status": "ok", "method": method, "video": cand.to_dict(),
@@ -528,24 +629,47 @@ class Pipeline:
                       "transcript_chars": len(text), "transcript_lang": lang,
                       "transcript_excerpt": sample_transcript(text, 6000), "checked": checked,
                       "stt_checked": stt_notes, "skipped": skipped, "passed_over": self._passed_over(top, skipped),
-                      "candidates": top, "updated_at": now, "checked_at": now, "error": error, **result}
+                      "candidates": top, "rejected": rejected, "updated_at": now, "checked_at": now, "error": error,
+                      **result}
+            if unverified:
+                record["about_unverified"] = True
             if speech is not None:
                 record["stt"] = speech.meta()
             return record
+        return self._described(title, tried, top, rejected, checked, stt_notes, skipped, stats, now)
 
-        best = candidates[0]
-        self._refine(best)
-        note = failure_note(checked, stt_notes, skipped, captions)
-        base = {"status": "no_transcript", "video": best.to_dict(), "checked": checked, "stt_checked": stt_notes,
-                "skipped": skipped, "candidates": top, "updated_at": now, "checked_at": now, "note": note}
-        if best.description:
-            text = f"Название: {best.title}\nОписание: {best.description[:3000]}"
-            result, method, error = self._conclude(title, best, text, "description")
+    def _described(self, title: str, tried: list[VideoCandidate], top: list[dict], rejected: list[dict],
+                   checked: list[dict], stt_notes: list[dict], skipped: list[dict], stats: dict, now: str) -> dict:
+        captions = self.settings.youtube_captions
+        wrong = {r["video_id"] for r in rejected}
+        pool = [c for c in tried if c.video_id not in wrong]
+        for cand in pool:
+            if not cand.description:
+                continue
+            text = f"Название: {cand.title}\nОписание: {cand.description[:3000]}"
+            result, method, error = self._conclude(title, cand, text, "description")
+            if result is not None and result.get("about_this_game") is False:
+                skipped.append({"video_id": cand.video_id, "reason": WRONG_GAME_DESCRIPTION})
+                rejected.append({"video_id": cand.video_id, "title": cand.title, "reason": WRONG_GAME_DESCRIPTION,
+                                 "other_game": result.get("other_game")})
+                wrong.add(cand.video_id)
+                continue
             if result is None:
-                result = {"summary": best.description[:600], "pros": [], "cons": [], "verdict": ""}
+                result = {"summary": cand.description[:600], "pros": [], "cons": [], "verdict": ""}
                 method = "description"
-            return {**base, "method": method, "error": error, **result}
-        return {**base, "method": "none"}
+            return {"status": "no_transcript", "video": cand.to_dict(), "checked": checked, "stt_checked": stt_notes,
+                    "skipped": skipped, "candidates": top, "rejected": rejected, "updated_at": now,
+                    "checked_at": now, "note": failure_note(checked, stt_notes, skipped, captions),
+                    "method": method, "error": error, **result}
+        rest = [c for c in pool if c.video_id not in wrong]
+        if rest:
+            return {"status": "no_transcript", "video": rest[0].to_dict(), "checked": checked,
+                    "stt_checked": stt_notes, "skipped": skipped, "candidates": top, "rejected": rejected,
+                    "updated_at": now, "checked_at": now, "note": failure_note(checked, stt_notes, skipped, captions),
+                    "method": "none"}
+        return {"status": "no_video", "method": "none", "candidates": top, "updated_at": now, "checked_at": now,
+                "note": self.no_video_note(title, stats, rejected), "search": stats, "rejected": rejected,
+                "skipped": skipped}
 
     @staticmethod
     def _passed_over(top: list[dict], skipped: list[dict]) -> list[dict]:
@@ -578,27 +702,27 @@ class Pipeline:
             return None, f"внутренняя ошибка распознавания ({exc.__class__.__name__})", True
 
     def _refine(self, cand) -> None:
+        refine = getattr(self.yt, "refine", None)
+        if refine is not None:
+            refine(cand)
+            return
         try:
             details = self.yt.watch_details(cand.video_id)
         except Exception as exc:
             log.info("Страница ролика %s недоступна: %s", cand.video_id, exc)
+            cand.refined = True
             return
-        if not details:
-            return
-        cand.title = details.get("title") or cand.title
-        cand.views = details.get("views") or cand.views
-        cand.length_seconds = details.get("length_seconds") or cand.length_seconds
-        cand.channel = details.get("channel") or cand.channel
-        cand.description = details.get("description") or cand.description
+        apply_watch_details(cand, details)
 
     def _conclude(self, title: str, cand, text: str, source: str):
         if self.llm is None:
             return None, None, "LLM отключена"
         if source == "description":
-            validator = validate_description_json
+            def validator(value):
+                return validate_description_json(value, title)
         else:
             def validator(value):
-                return validate_letsplay_json(value, text)
+                return validate_letsplay_json(value, text, title)
         try:
             result = self.llm.ask_json(
                 lambda budget: build_letsplay_prompt(title, cand.title, cand.channel, text, source, budget),
@@ -609,6 +733,25 @@ class Pipeline:
         except LLMError as exc:
             log.warning("LLM не написала заключение по летсплею для %s: %s", title, exc)
             return None, None, str(exc)[:200]
+
+    def recheck_videos(self, limit: int, deadline: datetime | None = None, skip_ids: set[int] | None = None) -> int:
+        done = 0
+        if self.yt is None or limit <= 0:
+            return 0
+        day = self.settings.today(self.clock())
+        for g in self.db.games_needing_video_recheck(limit + len(skip_ids or ())):
+            if done >= limit or (deadline is not None and self.clock() >= deadline):
+                break
+            if skip_ids and g["id"] in skip_ids:
+                continue
+            anchor = release_anchor(g["release_date"], g["platform_dates"])
+            if (g["trailer"] or {}).get("recheck"):
+                self.ensure_trailer(g["id"], g["slug"], g["title"], anchor, bool(g["video_embed_url"]), g["trailer"],
+                                    None, day)
+            if (g["letsplay"] or {}).get("recheck"):
+                self.refresh_letsplay(g["id"], g["slug"], g["title"], anchor, g["letsplay"], None, day)
+            done += 1
+        return done
 
     def backfill_llm(self, skip_ids: set[int], limit: int, deadline: datetime | None = None) -> int:
         upgraded = 0
@@ -652,12 +795,23 @@ class Pipeline:
             if result is None:
                 log.info("Досчёт заключения по летсплею для %s не удался, идём дальше", g["slug"])
                 continue
+            if result.get("about_this_game") is False:
+                log.info("Досчёт для %s: по ответу LLM ролик о другой игре, летсплей найдём заново", g["slug"])
+                reason = WRONG_GAME_DESCRIPTION if source == "description" else WRONG_GAME_LLM
+                now = iso(self.clock())
+                self.db.set_json(g["id"], "letsplay", {
+                    "status": "no_video", "method": "none", "candidates": [], "updated_at": now, "checked_at": now,
+                    "recheck": True, "rejected": [{"video_id": v["video_id"], "title": v.get("title"), "reason": reason,
+                                                   "other_game": result.get("other_game")}],
+                    "note": "Найденный раньше ролик оказался о другой игре; летсплей будет найден заново"})
+                continue
             if source != "description" and not result.get("has_commentary"):
                 log.info("Досчёт для %s: LLM не нашла комментариев автора, летсплей перепроверим поиском", g["slug"])
                 lp.update(llm_no_commentary=True, checked_at=iso(self.clock()))
                 self.db.set_json(g["id"], "letsplay", lp)
                 continue
             lp.update(result, method=method, error=None, updated_at=iso(self.clock()))
+            lp.pop("about_unverified", None)
             self.db.set_json(g["id"], "letsplay", lp)
             upgraded += 1
             if upgraded >= limit:

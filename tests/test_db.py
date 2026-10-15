@@ -123,24 +123,26 @@ def test_migration_recomputes_search_keys_and_flags_bad_summaries(tmp_path):
     russian = {"likes": ["Отличная боёвка в духе Sekiro"], "dislikes": [], "verdict": "Хорошо.", "method": "llm"}
     unverified = {"status": "ok", "method": "llm-transcript", "summary": "Автор ценит производительность",
                   "updated_at": "2026-10-15T00:00:00+00:00", "checked_at": "2026-10-15T00:00:00+00:00",
-                  "video": {"video_id": "zzzzzzzzzzz"}}
+                  "video": {"video_id": "zzzzzzzzzzz", "title": "KINGDOM HEARTS COLLECTION I-III Walkthrough Part 1"}}
     old2 = Database(str(path))
     old2.upsert_game(make_game(2, "kh", "Kingdom Hearts Collection I ~ III"), "x")
     old2.set_json(2, "letsplay", unverified)
     old2.close()
     letsplay = {"status": "no_transcript", "method": "llm-description", "summary": "Автор ролика отмечает…",
                 "pros": ["выдумано"], "cons": [], "verdict": "x",
-                "video": {"video_id": "bGBXM6oxbag", "title": "t", "description": "Full walkthrough of the game."}}
+                "video": {"video_id": "bGBXM6oxbag", "title": "Dragon's Dogma 2 Walkthrough",
+                          "description": "Full walkthrough of the game."}}
     with old.write() as c:
         c.execute("UPDATE games SET title_search='dragon''s dogma 2', user_summary=?, critic_summary=?, "
                   "user_reviews=?, letsplay=? WHERE id=1",
                   (json.dumps(english), json.dumps(russian), json.dumps([review]), json.dumps(letsplay)))
     old.close()
     raw = sqlite3.connect(path)
-    raw.execute(f"PRAGMA user_version = {dbmod.SCHEMA_VERSION - 1}")
+    raw.execute("PRAGMA user_version = 4")
     raw.commit()
     raw.close()
     db = Database(str(path))
+    assert db.schema_version == dbmod.SCHEMA_VERSION
     g = db.get_game(slug="dd2")
     assert g["title_search"] == "dragons dogma 2"
     assert db.list_games(q="dragons dogma")[1] == 1
@@ -151,6 +153,73 @@ def test_migration_recomputes_search_keys_and_flags_bad_summaries(tmp_path):
     assert [x["slug"] for x in db.games_with_fallbacks(5)] == ["dd2"]
     kh = db.get_game(slug="kh")["letsplay"]
     assert kh["updated_at"].startswith("2000-") and kh["checked_at"].startswith("2000-") and kh["summary"]
+    assert kh["recheck"] is True and g["letsplay"]["recheck"] is True
+
+
+def test_migration_resets_videos_of_other_games_and_flags_unverified_ones(tmp_path):
+    from app import db as dbmod
+
+    path = tmp_path / "v5.db"
+    old = Database(str(path))
+    stamp = "2026-10-15T04:00:00+00:00"
+    games = [
+        (1, "rock-hunter", "Rock Hunter",
+         {"video_id": "mh4aaaaaaaa", "title": "Monster Hunter 4 Ultimate - Part 12 Let's ROCK Basarios",
+          "published": "11y ago"}, None),
+        (2, "haunt", "HAUNT",
+         {"video_id": "hauntoldaaa", "title": "HAUNT - Full Playthrough", "published": "6y ago"},
+         {"video_id": "eternalhaun", "title": "Eternal Haunt - Official Gameplay Trailer", "views": 10,
+          "length_seconds": 90, "published": "11mo ago"}),
+        (3, "the-screamer", "The Screamer",
+         {"video_id": "magmaaaaaaa", "title": "Magma Juega MINECRAFT, The SCREAMER", "published": "11mo ago"},
+         {"video_id": "screameraaa", "title": "Screamer - Official Gameplay Mechanics Overview Trailer",
+          "views": 10, "length_seconds": 90, "published": "11mo ago"}),
+        (4, "valor-mortis", "Valor Mortis",
+         {"video_id": "valoraaaaaa", "title": "Valor Mortis is Great", "published": "4mo ago"},
+         {"video_id": "valortraile", "title": "Valor Mortis - Official Story Trailer | gamescom 2026", "views": 10,
+          "length_seconds": 90, "published": "1mo ago"}),
+        (6, "kaebon", "KAEBON", None, None),
+        (5, "bathyscaphe", "Bathyscaphe", None,
+         {"video_id": "bathytraile", "title": "Bathyscaphe Trailer", "views": 10, "length_seconds": 90,
+          "published": "17y ago"}),
+    ]
+    for gid, slug, title, lp_video, tr_video in games:
+        game = make_game(gid, slug, title)
+        game.release_date = "2026-10-15"
+        old.upsert_game(game, "x")
+        if gid == 6:
+            old.set_json(gid, "letsplay", {"status": "no_video", "method": "none", "updated_at": stamp,
+                                           "note": "Летсплеи по игре на YouTube есть, но ни в одном названии нет "
+                                                   "полного названия «KAEBON»."})
+        if lp_video:
+            old.set_json(gid, "letsplay", {"status": "ok", "method": "llm-transcript", "has_commentary": True,
+                                           "summary": "Игра «X» предлагает интересный геймплей.", "video": lp_video,
+                                           "updated_at": stamp, "checked_at": stamp})
+        if tr_video:
+            old.set_json(gid, "trailer", {"status": "ok", "source": "youtube", "video": tr_video,
+                                          "updated_at": stamp, "checked_at": stamp})
+    old.close()
+    raw = sqlite3.connect(path)
+    raw.execute(f"PRAGMA user_version = {dbmod.SCHEMA_VERSION - 1}")
+    raw.commit()
+    raw.close()
+    db = Database(str(path))
+    rock = db.get_game(slug="rock-hunter")["letsplay"]
+    assert rock["status"] == "no_video" and "video" not in rock and "summary" not in rock and rock["recheck"] is True
+    assert rock["rejected"][0]["video_id"] == "mh4aaaaaaaa" and "нет названия игры" in rock["rejected"][0]["reason"]
+    haunt = db.get_game(slug="haunt")
+    assert haunt["letsplay"]["status"] == "no_video" and "за год" in haunt["letsplay"]["rejected"][0]["reason"]
+    assert haunt["trailer"]["status"] == "none" and haunt["trailer"]["recheck"] is True
+    screamer = db.get_game(slug="the-screamer")
+    assert screamer["letsplay"]["status"] == "no_video" and screamer["letsplay"]["recheck"] is True
+    assert screamer["trailer"]["status"] == "none"
+    valor = db.get_game(slug="valor-mortis")
+    assert valor["letsplay"]["status"] == "ok" and valor["letsplay"]["recheck"] is True
+    assert valor["trailer"]["status"] == "ok" and "recheck" not in valor["trailer"]
+    assert db.get_game(slug="bathyscaphe")["trailer"]["status"] == "none"
+    assert db.get_game(slug="kaebon")["letsplay"]["recheck"] is True
+    assert sorted(g["slug"] for g in db.games_needing_video_recheck(10)) == [
+        "bathyscaphe", "haunt", "kaebon", "rock-hunter", "the-screamer", "valor-mortis"]
 
 
 def test_failed_games_are_retryable_until_the_cap(db):

@@ -25,7 +25,7 @@ from .http_client import PoliteClient
 from .llm import LLMClient
 from .metacritic import MetacriticClient, safe_url
 from .monitor import TRIGGER_LABELS, Monitor, MonitorLogHandler, monitor as default_monitor
-from .pipeline import Pipeline
+from .pipeline import NO_COMMENTARY, NO_TEXT, WRONG_GAME, Pipeline, ru_count
 from .scheduler import Scheduler
 from .stt import SpeechToText
 from .youtube import VIDEO_ID, YouTubeClient
@@ -191,7 +191,9 @@ def build_services(s: Settings, db: Database, monitor: Monitor) -> Pipeline:
                     max_prompt_chars=s.llm_max_prompt_chars or None, failure_threshold=s.llm_failure_threshold,
                     on_state=lambda status, detail: monitor.set_worker("llm", status, detail),
                     reasoning_effort=s.llm_reasoning_effort)
-    yt = YouTubeClient(http, s.youtube_proxy_url) if s.youtube_enabled else None
+    yt = (YouTubeClient(http, s.youtube_proxy_url, refine_top=s.youtube_max_candidates + 2,
+                        today=lambda: datetime.strptime(s.today(utcnow()), "%Y-%m-%d").date())
+          if s.youtube_enabled else None)
     stt = None
     stt_on, memory_note, model = stt_memory_plan(s, memory_limit_bytes())
     if memory_note:
@@ -414,6 +416,25 @@ def skip_reason(item: dict, lp: dict) -> str:
     return "; ".join(parts) or item["reason"]
 
 
+def described_reason(lp: dict) -> str:
+    reasons = [x.get("reason") for x in lp.get("skipped") or []]
+    no_text = sum(1 for r in reasons if r == NO_TEXT)
+    no_talk = sum(1 for r in reasons if r in NO_COMMENTARY)
+    other = sum(1 for r in reasons if r in WRONG_GAME)
+    if no_talk and not no_text:
+        text = "У подходящих роликов нет комментариев блогера (только игра, диалоги или музыка)"
+    elif no_talk:
+        text = ("У одних подходящих роликов нет ни субтитров, ни распознанной речи, у других нет комментариев "
+                "блогера (только игра, диалоги или музыка)")
+    elif no_text or not other:
+        text = "Ни субтитров, ни распознанной речи у подходящих роликов нет"
+    else:
+        text = "Расшифровать речь блогера не удалось"
+    if other:
+        text += f"; ещё {ru_count(other, 'ролик оказался', 'ролика оказались', 'роликов оказались')} о другой игре"
+    return text + ", поэтому мнение блогера здесь не приводится: выше только пересказ описания ролика."
+
+
 def video_info(g: dict) -> dict | None:
     embed = safe_url(g.get("video_embed_url"))
     if embed:
@@ -572,6 +593,8 @@ def create_app(s: Settings | None = None, pipeline: Pipeline | None = None, star
         lp = g.get("letsplay")
         if isinstance(lp, dict) and lp.get("passed_over"):
             lp["passed_over"] = [{**item, "reason": skip_reason(item, lp)} for item in lp["passed_over"]]
+        if isinstance(lp, dict):
+            lp["described_reason"] = described_reason(lp)
         g["metacritic_url"] = f"https://www.metacritic.com/game/{g['slug']}/"
         g["video"] = video_info(g)
         g["video_url"] = g["video"]["url"] if g["video"] else None

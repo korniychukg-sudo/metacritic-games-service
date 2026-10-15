@@ -566,27 +566,51 @@ def test_a_worse_refresh_never_replaces_a_stored_letsplay_or_trailer(settings, d
     assert lp["video"]["video_id"] == TOP and lp["method"] == "llm-transcript" and "20 минут" in lp["last_error"]
 
 
-def test_no_video_note_explains_the_strict_title_check(settings, db):
+def test_no_video_note_says_lets_plays_exist_only_after_a_near_miss(settings, db):
     settings.batch_size = 1
 
-    class OtherSeries(FakeYouTube):
+    class Searched(FakeYouTube):
+        stats = {}
+
         def find_letsplays(self, title, release_date=None):
             self.searches += 1
-            self.last_stats = {"found": 12, "eligible": 0, "title_mismatch": 7}
+            self.last_stats = dict(self.stats)
             return []
 
-    yt = OtherSeries()
-    make(settings, db, yt=yt).run()
-    lp = db.get_game(slug="over-the-hill")["letsplay"]
-    assert lp["status"] == "no_video" and "ни в одном названии нет полного названия «over the hill»" in lp["note"]
-    assert lp["search"]["title_mismatch"] == 7
+    cases = [
+        ({"found": 12, "eligible": 0, "title_mismatch": 7, "near_miss": 2},
+         "есть похожие ролики (2), но ни в одном названии нет полного названия «over the hill»"),
+        ({"found": 21, "eligible": 0, "title_mismatch": 21},
+         "YouTube вернул 21 ролик, но ни в одном названии нет «over the hill»; проверим снова через сутки"),
+        ({"found": 3, "eligible": 0, "too_old": 3}, "опубликованы больше чем за год до выхода игры"),
+        ({"found": 2, "eligible": 0, "dropped": [{"video_id": "x", "title": "GTA 5 #29", "reason": "r"}]},
+         "проверка показала, что они о другой игре"),
+        ({"found": 0, "eligible": 0}, "не нашлось летсплеев длиннее 20 минут"),
+    ]
+    for stats, expected in cases:
+        forget_today(db)
+        with db.write() as c:
+            c.execute("UPDATE games SET letsplay=NULL")
+        yt = Searched()
+        yt.stats = stats
+        make(settings, db, yt=yt).run()
+        lp = db.get_game(slug="over-the-hill")["letsplay"]
+        assert lp["status"] == "no_video" and expected in lp["note"], (stats, lp["note"])
+        assert "Летсплеи по игре на YouTube есть" not in lp["note"]
+    assert lp["search"] == {"found": 0, "eligible": 0}
 
 
-def test_release_date_reaches_the_youtube_search(settings, db):
+def test_earliest_release_date_reaches_the_youtube_search(settings, db):
     settings.batch_size = 1
     yt = FakeYouTube()
     make(settings, db, yt=yt).run()
-    assert yt.release_dates == [db.get_game(slug="over-the-hill")["release_date"]] and yt.release_dates[0]
+    g = db.get_game(slug="over-the-hill")
+    dates = [g["release_date"]] + [p["release_date"] for p in g["platforms"] if p["release_date"]]
+    assert yt.release_dates == [min(dates)] and yt.release_dates[0]
+    from app.pipeline import release_anchor
+
+    assert release_anchor("2026-10-15", ["2026-07-10", None, "bad"]) == "2026-07-10"
+    assert release_anchor(None, []) is None
 
 
 def test_captions_can_be_switched_off_to_go_straight_to_whisper(settings, db, tmp_path):
@@ -712,3 +736,123 @@ def test_an_unverified_old_conclusion_is_replaced_by_an_honest_result(settings, 
     assert letsplay_rank({"status": "ok", "method": "llm-transcript", "has_commentary": True, "video": {"video_id": "x"}}) == 3
     assert letsplay_rank({"status": "ok", "method": "extractive-whisper", "video": {"video_id": "x"}}) == 3
     assert letsplay_rank({"status": "ok", "method": "llm-whisper", "video": {"video_id": "x"}}) == 2
+
+
+def test_a_video_about_another_game_is_skipped_and_never_kept(settings, db):
+    settings.batch_size = 1
+    yt = FakeYouTube()
+    llm = FakeLLM(about=lambda prompt: "Star Wars Galactic Racer»" not in prompt)
+    make(settings, db, yt=yt, llm=llm).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "ok" and lp["video"]["video_id"] == SECOND and lp["about_this_game"] is True
+    assert [x["video_id"] for x in lp["passed_over"]] == [TOP]
+    assert "о другой игре" in lp["passed_over"][0]["reason"]
+    assert [r["video_id"] for r in lp["rejected"]] == [TOP]
+
+    forget_today(db)
+    with db.write() as c:
+        c.execute("UPDATE games SET letsplay=json_set(letsplay, '$.recheck', json('true'))")
+    wrong_everywhere = FakeLLM(about=False)
+    clock = FakeClock(datetime(2026, 10, 15, 9, 0, tzinfo=timezone.utc))
+    make(settings, db, yt=yt, llm=wrong_everywhere, clock=clock).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "no_video" and "video" not in lp and "о другой игре" in lp["note"]
+    assert {r["video_id"] for r in lp["rejected"]} >= {TOP, SECOND, THIRD}
+    assert all("о другой игре" in x["reason"] for x in lp["skipped"])
+
+
+def test_videos_beyond_the_checked_top_are_rechecked_by_their_original_title(settings, db):
+    settings.batch_size = 1
+
+    class Translated(FakeYouTube):
+        def find_letsplays(self, title, release_date=None):
+            ranked = super().find_letsplays(title, release_date)
+            ranked[0].refined = False
+            return ranked
+
+        def watch_details(self, video_id):
+            if video_id == TOP:
+                return {"title": "GTA 5 #29 - Kradzież batyskafu i ciężarówki", "published_date": "2026-03-01"}
+            return super().watch_details(video_id)
+
+    yt = Translated()
+    make(settings, db, yt=yt).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "ok" and lp["video"]["video_id"] == SECOND
+    assert lp["rejected"][0]["video_id"] == TOP and "Kradzież" in lp["rejected"][0]["reason"]
+    assert lp["rejected"][0]["search_title"].startswith("over the hill - ")
+    assert lp["passed_over"] == []
+
+
+def test_description_retelling_skips_descriptions_of_other_games(settings, db):
+    settings.batch_size = 1
+    yt = FakeYouTube(transcript_ok=False)
+    llm = FakeLLM(about=lambda prompt: "Описание ролика на YouTube" not in prompt or "INTRO (FULL GAME)" in prompt)
+    make(settings, db, yt=yt, llm=llm).run()
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "no_transcript" and lp["method"] == "llm-description"
+    assert lp["video"]["video_id"] == SECOND and [r["video_id"] for r in lp["rejected"]] == [TOP]
+    assert "о другой игре: 1 ролик" in lp["note"]
+
+
+def test_flagged_videos_are_rechecked_without_waiting_for_metacritic(settings, db):
+    settings.batch_size = 2
+    clock = FakeClock()
+    yt = FakeYouTube()
+    p = make(settings, db, mc=FakeMetacritic(no_video=True), yt=yt, clock=clock)
+    p.run()
+    slugs = [g["slug"] for g in db.list_games(None, None, "title", 10, 0)[0]]
+    first, second = (db.get_game(slug=x) for x in slugs[:2])
+    with db.write() as c:
+        c.execute("UPDATE games SET letsplay=json_set(letsplay, '$.recheck', json('true')) WHERE id=?", (first["id"],))
+        c.execute("UPDATE games SET trailer=json_set(trailer, '$.recheck', json('true'), '$.status', 'none') "
+                  "WHERE id=?", (second["id"],))
+    searches, trailer_searches = yt.searches, yt.trailer_searches
+    assert p.recheck_videos(1) == 1
+    assert yt.searches == searches + 1 and yt.trailer_searches == trailer_searches
+    assert "recheck" not in db.get_game(game_id=first["id"])["letsplay"]
+    assert [g["id"] for g in db.games_needing_video_recheck(5)] == [second["id"]]
+    assert p.recheck_videos(5) == 1 and yt.trailer_searches == trailer_searches + 1
+    assert db.get_game(game_id=second["id"])["trailer"]["status"] == "ok"
+    assert db.games_needing_video_recheck(5) == []
+    assert p.recheck_videos(5) == 0
+    with db.write() as c:
+        c.execute("UPDATE games SET trailer=json_set(trailer, '$.recheck', json('true')), "
+                  "video_embed_url='https://cdn.jwplayer.com/players/x.html' WHERE id=?", (second["id"],))
+    assert p.recheck_videos(5) == 1 and yt.trailer_searches == trailer_searches + 1
+    assert db.games_needing_video_recheck(5) == []
+
+
+def test_a_stored_trailer_that_fails_the_new_rules_is_not_kept(settings, db):
+    settings.batch_size = 1
+    clock = FakeClock()
+    yt = FakeYouTube()
+    p = make(settings, db, mc=FakeMetacritic(no_video=True), yt=yt, clock=clock)
+    p.run()
+    g = db.get_game(slug="over-the-hill")
+    wedding = {**g["trailer"], "video": {**g["trailer"]["video"], "title": "ETHAN & OVER THE HILL/ OUR WEDDING TRAILER"}}
+    db.set_json(g["id"], "trailer", wedding)
+    forget_today(db)
+    clock.advance(days=8)
+    yt.no_trailer = True
+    p.run()
+    assert db.get_game(slug="over-the-hill")["trailer"]["status"] == "none"
+
+
+def test_an_unverified_old_video_is_not_kept_when_the_new_search_finds_nothing(settings, db):
+    settings.batch_size = 1
+    clock = FakeClock()
+    yt = FakeYouTube()
+    p = make(settings, db, yt=yt, clock=clock)
+    p.run()
+    g = db.get_game(slug="over-the-hill")
+    db.set_json(g["id"], "letsplay", {**g["letsplay"], "recheck": True})
+    yt.empty = True
+    assert p.recheck_videos(5) == 1
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["status"] == "no_video" and "video" not in lp and "recheck" not in lp
+    db.set_json(g["id"], "letsplay", {**g["letsplay"], "recheck": True})
+    yt.empty, yt.blocked = False, True
+    assert p.recheck_videos(5) == 1
+    lp = db.get_game(slug="over-the-hill")["letsplay"]
+    assert lp["video"]["video_id"] == TOP and lp["recheck"] is True and "капчу" in lp["last_error"]

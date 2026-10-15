@@ -104,6 +104,7 @@ class Settings:
     youtube_enabled: bool = field(default_factory=lambda: _bool("YOUTUBE_ENABLED", True))
     youtube_proxy_url: str = field(default_factory=lambda: os.environ.get("YOUTUBE_PROXY_URL", ""))
     youtube_max_candidates: int = field(default_factory=lambda: _int("YOUTUBE_MAX_CANDIDATES", 3, 1, 10))
+    video_recheck_limit: int = field(default_factory=lambda: _int("VIDEO_RECHECK_LIMIT", 5, 0, 100))
     letsplay_refresh_days: int = field(default_factory=lambda: _int("LETSPLAY_REFRESH_DAYS", 7, 1))
     letsplay_retry_hours: int = field(default_factory=lambda: _int("LETSPLAY_RETRY_HOURS", 24, 1))
     trailer_fallback: bool = field(default_factory=lambda: _bool("YOUTUBE_TRAILER_FALLBACK", True))

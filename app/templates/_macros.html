@@ -20,3 +20,15 @@
   <span class="chips">{{ meta_badge(s.metascore) }}{% for r in s.reasons[:2] %}<span class="chip">{{ r }}</span>{% endfor %}</span>
 </a>
 {%- endmacro %}
+{% macro rejected_list(items) -%}
+{% if items %}
+<details>
+  <summary>Отброшенные ролики ({{ items|length }}): о другой игре или вышли задолго до неё</summary>
+  <ul class="quotes">
+    {% for r in items %}
+    <li><a href="https://www.youtube.com/watch?v={{ r.video_id|urlencode }}" target="_blank" rel="noopener noreferrer">{{ r.title or r.video_id }}</a>: {{ r.reason }}{% if r.other_game %}, ролик про «{{ r.other_game }}»{% endif %}</li>
+    {% endfor %}
+  </ul>
+</details>
+{% endif %}
+{%- endmacro %}

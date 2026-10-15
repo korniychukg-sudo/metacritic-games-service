@@ -65,7 +65,20 @@ def test_title_mismatches_are_counted():
              VideoCandidate("c", "Dragon's Dogma 2 Official Trailer", views=5, length_seconds=3600)]
     ranked = rank_candidates("Dragon's Dogma 2: Dark Arisen", cands, stats=stats)
     assert [c.video_id for c in ranked] == ["b"]
-    assert stats == {"title_mismatch": 1, "found": 3, "eligible": 1}
+    assert stats == {"excluded": 1, "title_mismatch": 1, "near_miss": 1, "found": 3, "eligible": 1}
+
+
+def test_only_videos_sharing_half_the_title_words_count_as_near_misses():
+    from app.youtube import near_miss
+
+    stats = {}
+    cands = [VideoCandidate(str(i) * 11, t, views=10, length_seconds=3600) for i, t in enumerate([
+        "Minecraft Hardcore Day 100", "GTA 5 Funny Moments", "KAEBON Thai Horror", "Sudoku for beginners"])]
+    assert rank_candidates("KAEBON", cands[:2], stats=stats) == []
+    assert stats.get("title_mismatch") == 2 and "near_miss" not in stats
+    assert near_miss("Sudoku University", "Sudoku for beginners")
+    assert not near_miss("College Hockey 27", "NHL 26 Be a Pro")
+    assert near_miss("Rock Hunter", "Monster Hunter 4 Ultimate - Part 12 Let's ROCK Basarios")
 
 
 def test_videos_without_commentary_are_not_lets_plays():
@@ -229,13 +242,17 @@ def test_trailers_of_re_releases_need_the_edition_words_and_a_recent_date():
     ranked = rank_trailers("Game Z", old_and_new, release_date="2026-10-10", today=date(2026, 10, 15))
     assert [c.video_id for c in ranked] == ["new00000000"]
     only_old = rank_trailers("Game Z", old_and_new[:1], release_date="2026-10-10", today=date(2026, 10, 15))
-    assert [c.video_id for c in only_old] == ["old00000000"]
+    assert only_old == []
 
-    html = ('<script>var ytInitialData = {"a": [{"videoRenderer": {"videoId": "kh3aaaaaaaa", "title": {"runs": '
-            '[{"text": "Kingdom Hearts III - Official Trailer"}]}, "viewCountText": {"simpleText": "9 views"},'
-            ' "lengthText": {"simpleText": "2:01"}}}]};</script>')
-    cand = YouTubeClient(StubSearchHttp([html])).find_trailer("Kingdom Hearts Collection I ~ III")
-    assert cand.video_id == "kh3aaaaaaaa" and cand.base_game is True and cand.to_dict()["base_game"] is True
+    html = ('<script>var ytInitialData = {"a": [{"videoRenderer": {"videoId": "dw3aaaaaaaa", "title": {"runs": '
+            '[{"text": "Dynasty Warriors 3 - Official Trailer"}]}, "viewCountText": {"simpleText": "9 views"},'
+            ' "lengthText": {"simpleText": "2:01"}, "publishedTimeText": {"simpleText": "15 years ago"}}}]};</script>')
+    cand = YouTubeClient(StubSearchHttp([html]), today=lambda: date(2026, 10, 15)).find_trailer(
+        "Dynasty Warriors 3 Complete Edition Remastered", "2026-10-01")
+    assert cand.video_id == "dw3aaaaaaaa" and cand.base_game is True and cand.to_dict()["base_game"] is True
+    old = html.replace("Dynasty Warriors 3", "Bathyscaphe")
+    assert YouTubeClient(StubSearchHttp([old]), today=lambda: date(2026, 10, 15)).find_trailer(
+        "Bathyscaphe", "2026-10-15") is None
 
 
 def test_caption_errors_become_plain_russian_reasons():
@@ -326,3 +343,167 @@ def test_caption_requests_go_through_the_rate_limiter():
         pass
     else:
         raise AssertionError
+
+
+def test_lets_plays_of_other_games_with_similar_titles_are_rejected():
+    from app.youtube import title_matches
+
+    wrong = [
+        ("Rock Hunter", "Monster Hunter 4 Ultimate - Part 12 Let's ROCK Basarios (Stone Dragon)"),
+        ("THE GUARDIANS", "GUARDIANS OF THE GALAXY PS5 Walkthrough Gameplay Part 1 - INTRO (FULL GAME)"),
+        ("Hunt Me", "The Witcher 3 Wild Hunt Прохождение Серия 73"),
+        ("MEAT AND FLOWERS", "Gaia Online Dev Meat 4/24/26: April Showers? May Flowers."),
+        ("Fatal Train", "Fatal Frame 1: #1 (END) - Halloween Horror Train 19' [09/20/19]"),
+        ("Melon Rally", "Pac Man World Rally Part 3 Multiplayer Melon Cup"),
+        ("Reason and Rhyme", "Let's Play Pokemon Stadium 2 #31 Chatting without rhyme or reason"),
+        ("Alice Nation", "Alice Plays :: SimCity :: Episode 2 :: Education for the Nation!"),
+        ("Toys Co.", "New Toys On The Farm! | Bucks Co, PA | Let's Play FS19"),
+        ("The Nightmare Box Vol III", "The Nightmare Box vol 2 Dagon ep 1"),
+        ("Isle Forge", "Zelda Classic → Isle of Rebirth Walkthrough: 4 - Abandoned Forge"),
+        ("Labyrinth A Way Out", "Kingdom Hearts 3 - Arendelle Walkthrough Part 8 - Find a Way Out of The Labyrinth"),
+        ("Backrooms Adventure", "SUPER BEAR ADVENTURE İMKANSIZ BACKROOMS! GİZEMLİ YER BULDUM!"),
+        ("House Flipper 2 + Sakura DLC", "We Got Paid to Renovate a Haunted House?! (House Flipper 2 Scooby Doo DLC)"),
+        ("Fossil Digger", "Digger of a Fossil - Part 2"),
+        ("Planet Zoo", "Planet Zoo 2 Let's Play Part 1"),
+        ("Hades", "Hades II - Let's Play Part 1"),
+        ("Qiang Gu: Ghost Festival", "Hungry Ghost Festival walkthrough"),
+        ("HAUNT", "Kings Island Haunt 2026 FIRST LOOK - Maze POV Walkthroughs - JASON: Blood Reign"),
+        ("The Screamer", "Magma Juega MINECRAFT, The SCREAMER"),
+        ("HAUNT", "Super Mario 64 - Gameplay Walkthrough Part 5 - Big Boo's Haunt 100%"),
+    ]
+    right = [
+        ("Crimson Desert: Charting the Unknown", "CRIMSON DESERT Enhanced - Charting the Unknown DLC Hype"),
+        ("Folded Fables: Tidy Up The Dragon Hoard", "Sorting A Dragon's Horde ~ Folded Fables Tidy Up The Dragon Hoard"),
+        ("Silent Wounds - The Doll", "UN JEU D'HORREUR GRATUIT SYMPA ? | SILENT WOUNDS : THE DOLL Gameplay FR"),
+        ("Clive Barker's Hellraiser: Revival", "So... I Played Hellraiser: Revival"),
+        ("Gears of War: E-Day", "Gears of War E-Day - Part 1 - WHERE IT ALL BEGAN.."),
+        ("Kingdom Hearts III", "Kingdom Hearts 3 Let's Play Part 1"),
+        ("The Nightmare Box Vol III", "The Nightmare Box Vol. 3 - Full Playthrough"),
+        ("Grand Theft Auto V", "GTA V is still great - Grand Theft Auto 5 Let's Play"),
+        ("Dynasty Warriors 3 Complete Edition Remastered", "【DYNASTY WARRIORS 3 REMASTERED】back to three kingdoms"),
+        ("HAUNT", "HAUNT - Full Playthrough"),
+        ("HAUNT", "Let's Play HAUNT - Part 1"),
+        ("HAUNT", "I Played HAUNT and it's terrifying"),
+        ("Retrospace", "Vinny - RetroSpace"),
+        ("Panchofobia", "YO SOLO QUERIA UN PANCHO - Panchofobia"),
+        ("Allogloom", "ALLOGLOOM - Полное прохождение"),
+        ("The Screamer", "The Screamer - Full Walkthrough"),
+    ]
+    for game, video in wrong:
+        assert not title_matches(game, video), (game, video)
+    for game, video in right:
+        assert title_matches(game, video), (game, video)
+    assert title_matches("Grand Theft Auto V", "Grand Theft Auto 5 Let's Play")
+
+
+def test_lets_plays_published_long_before_release_are_skipped():
+    from datetime import date
+
+    base = dict(views=10, length_seconds=3600, channel="c")
+    cands = [
+        VideoCandidate("sm64aaaaaaa", "Super Mario 64 - Big Boo's Haunt 100%", published="6 years ago",
+                       **{**base, "views": 9000}),
+        VideoCandidate("fibsaaaaaaa", "HAUNT Let's Play Part 1", published="1 year ago", **{**base, "views": 800}),
+        VideoCandidate("hauntnewaaa", "HAUNT Let's Play Part 1", published="11 months ago", **base),
+        VideoCandidate("hauntexact1", "HAUNT gameplay", published_date="2026-09-01", **base),
+        VideoCandidate("hauntexact2", "HAUNT gameplay", published_date="2025-01-01", published="1 month ago", **base),
+    ]
+    stats = {}
+    ranked = rank_candidates("HAUNT", cands, release_date="2026-10-15", today=date(2026, 10, 15), stats=stats)
+    assert [c.video_id for c in ranked] == ["hauntnewaaa", "hauntexact1"]
+    assert stats["too_old"] == 2 and stats["title_mismatch"] == 1
+    unknown = rank_candidates("HAUNT", cands, today=date(2026, 10, 15))
+    assert len(unknown) == 4
+
+
+def test_original_titles_replace_machine_translations_before_the_final_choice():
+    from datetime import date
+
+    from app.youtube import YouTubeClient
+
+    def renderer(vid, title, views, age="2 weeks ago"):
+        return ('{"videoRenderer": {"videoId": "%s", "title": {"runs": [{"text": "%s"}]}, "viewCountText": '
+                '{"simpleText": "%d views"}, "lengthText": {"simpleText": "40:00"}, "publishedTimeText": '
+                '{"simpleText": "%s"}}}' % (vid, title, views, age))
+
+    search = ('<script>var ytInitialData = {"a": [' + ",".join([
+        renderer("gtalcsaaaaa", "Walkthrough of GTA Liberty City Stories on PC - Not My Son / Proposal / Part 4", 9000),
+        renderer("earlyaaaaaa", "Я поиграл в Not My Son раньше всех!", 5000),
+        renderer("okaaaaaaaaa", "Not My Son - Part 1", 100),
+    ]) + ']};</script>')
+    empty = '<script>var ytInitialData = {"a": [], "backgroundPromoRenderer": {}};</script>'
+    originals = {"gtalcsaaaaa": "Прохождение GTA Liberty City Stories на ПК - Не Мой Сын / Предложение / Часть 4",
+                 "earlyaaaaaa": "I Played Not My Son Early!", "okaaaaaaaaa": "Not My Son - Part 1"}
+
+    class Http(StubSearchHttp):
+        def get(self, url, params=None, headers=None, cookies=None):
+            if "v" not in (params or {}):
+                return super().get(url, params, headers, cookies)
+            vid = params["v"]
+            self.calls.append(params)
+
+            class R:
+                text = ('<script>var ytInitialPlayerResponse = {"videoDetails": {"videoId": "%s", "title": "%s", '
+                        '"viewCount": "100", "lengthSeconds": "2400", "author": "a"}, "microformat": '
+                        '{"playerMicroformatRenderer": {"publishDate": "2026-10-01T07:00:00-07:00"}}};</script>'
+                        % (vid, originals[vid]))
+                url = "https://www.youtube.com/watch"
+            return R()
+
+    yt = YouTubeClient(Http([search, empty]), today=lambda: date(2026, 10, 15))
+    ranked = yt.find_letsplays("Not My Son", "2026-10-15")
+    assert [c.video_id for c in ranked] == ["okaaaaaaaaa", "earlyaaaaaa"]
+    early = ranked[1]
+    assert early.title == "I Played Not My Son Early!" and early.search_title.startswith("Я поиграл")
+    assert early.published_date == "2026-10-01" and early.refined
+    dropped = yt.last_stats["dropped"]
+    assert [d["video_id"] for d in dropped] == ["gtalcsaaaaa"] and "Прохождение GTA" in dropped[0]["reason"]
+    assert yt.last_stats["eligible"] == 2
+
+
+def test_watch_page_gives_the_exact_publish_date():
+    d = parse_watch_html(load_text("yt_watch_bGBXM6oxbag.html"))
+    assert d["published_date"] == "2026-10-10"
+
+
+def test_trailers_must_name_the_game_on_its_own_and_be_recent():
+    from datetime import date
+
+    from app.youtube import trailer_problem
+
+    def cand(title, published="2 months ago", channel="Publisher"):
+        return VideoCandidate("x" * 11, title, views=1000, length_seconds=120, channel=channel, published=published)
+
+    today = date(2026, 10, 15)
+    wrong = [
+        ("Vanisha", cand("ETHAN & VANISHA/ OUR WEDDING TRAILER", "11 months ago", "Ethan Gets His Van")),
+        ("THE GUARDIANS", cand("BLADES OF THE GUARDIANS Official Trailer (2026) Jet Li", "7 months ago",
+                               "Movie Trailers Source")),
+        ("THE GUARDIANS", cand("BLADES OF THE GUARDIANS Official Trailer (2026) Jet Li", "7 months ago")),
+        ("Qiang Gu: Ghost Festival", cand("Ghost Month 2023 (Official Trailer) Hungry Ghost Festival", "4 years ago")),
+        ("Bathyscaphe", cand("Bathyscaphe Trailer", "17 years ago")),
+        ("HAUNT", cand("Eternal Haunt - Official Gameplay Trailer | Indie Horror Showcase 2025", "11 months ago")),
+        ("Pestilence", cand("Plague Doctor: Life in Pestilence - Official Announcement Trailer", "10 months ago")),
+        ("The Screamer", cand("Screamer - Official Gameplay Mechanics Overview Trailer", "11 months ago")),
+        ("The Nightmare Box Vol III", cand("Nightmare Box Vol I: Remorse: The List - PlayStation 5 - Trailer")),
+        ("House Flipper 2 + Sakura DLC", cand("House Flipper 2: Pets - Official DLC Announcement Trailer")),
+        ("FIBS", cand("FIBS   Trailer", "7 years ago")),
+        ("Thalia", cand("Official Trailer of Thalia & Leo.", "7 months ago")),
+    ]
+    right = [
+        ("Kings of Antikva", cand("Trailer Kings Of Antikva", "1 year ago")),
+        ("Alice Nation", cand("Alice Nation 丨 Trailer")),
+        ("KAEBON", cand("KAEBON แก้บน | Official Teaser Trailer | Thai Horror Game")),
+        ("Wolfsschanze - Operation Gotterdammerung", cand("Wolfsschanze – Operation Götterdämmerung | Trailer")),
+        ("Kingdom Hearts Collection I ~ III", cand("Kingdom Hearts Collection [I ~ III] - Official Launch Trailer")),
+        ("SpudFall", cand("A Beautiful Potato Game: Spudfall Trailer")),
+        ("GO DUB YOURSELF!", cand("GO DUB YOURSELF! - Official Trailer | Movie Dubbing Party Game")),
+        ("Fossil Digger", cand("Fossil Digger by PIJI - Official Trailer | PIJI App Game", "1 year ago")),
+        ("The Screamer", cand("The Screamer - Official Launch Trailer")),
+        ("Hunt Me", cand("Hunt Me - Horror Game - Official Trailer - Release 6 Dec 24", "1 year ago")),
+        ("Tribal Trouble: Resurrected", cand("Tribal Trouble Resurrected - Trailer")),
+    ]
+    for game, c in wrong:
+        assert trailer_problem(game, c, "2026-10-15", today) is not None, (game, c.title)
+    for game, c in right:
+        assert trailer_problem(game, c, "2026-10-15", today) is None, (game, c.title)
